@@ -1,0 +1,15 @@
+# ===== NEVER COMMIT: secrets, stores, keys, ledgers =====
+.vault/
+*.env
+.env.*
+*recovery*
+*RECOVERY*
+rkey*
+recovery.key
+VAULT_AUDIT.md
+*.ledger*
+ledger.jsonl
+
+# ===== OS cruft =====
+.DS_Store
+Thumbs.db
