@@ -728,22 +728,23 @@ def cmd_ledger():
 
 def _banner():
     """CipherGate ASCII logo: a field of 0s and 1s (the data), with a keyhole
-    punched clean through it = locked until the gate (Batman) opens it."""
+    punched clean through it — round hole on top, vertical-base slot that
+    flares wider at the bottom line = locked until the gate opens it."""
     logo = r"""
 101010101010101
-010101010101010
+010101   101010
+10101     10101
+0101      1010
+10101     10101
+010101   101010
 101010   010101
-01010     01010
+010101   101010
 10101     10101
 01010     01010
-101010   010101
-010101   101010
-101010   010101
-010101   101010
-101010101010101
+1010      1010
     """
     print(logo)
-    print("   C I P H E R G A T E — the keyhole through the data.\n")
+    print("   CipherGate — Secure API Routing\n")
     print("   API keys held encrypted; every call waits on the gate.\n")
 
 def main():
