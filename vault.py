@@ -460,17 +460,57 @@ def cmd_lease(passphrase):
     return 0
 
 def cmd_call(argv, passphrase):
-    if len(argv) < 2: print("usage: vault.py call <service> <url>"); return 1
-    service, url = argv[0], argv[1]
-    plain = unwrap(service, passphrase)
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + plain})
+    # call <method> <url> --header "Name:[key_name]" ... [--data <json with [key] placeholders>]
+    # Provider-agnostic: the caller supplies the FULL request; the vault swaps
+    # each [key_name] placeholder for the held secret, sends as-is, returns the
+    # raw response. The vault does NOT know fal vs DO vs any auth shape.
+    if len(argv) < 3:
+        print("usage: vault.py call <method> <url> [--header 'Name:[key_name]']... [--data <json>]")
+        return 1
+    method = argv[0].upper()
+    url = argv[1]
+    headers = {}
+    data = None
+    i = 2
+    while i < len(argv):
+        if argv[i] == "--header":
+            nv = argv[i+1].split(":", 1)
+            headers[nv[0].strip()] = nv[1].strip(" ") if len(nv) > 1 else ""
+            i += 2
+        elif argv[i] == "--data":
+            data = argv[i+1].encode()
+            i += 2
+        else:
+            i += 1
+    if method in ("POST", "PUT", "PATCH") and data is None:
+        data = b""
+    if data is None:
+        data = bytes()
+    # substitute every [key_name] placeholder with the held secret
+    def sub(s):
+        if isinstance(s, str) and "[" in s:
+            out = s
+            for name in st.keys():
+                out = out.replace("[" + name + "]", unwrap(name, passphrase))
+            return out
+        return s
+    st = load_store()
+    final_headers = {k: sub(v) for k, v in headers.items()}
+    final_data = data
+    if data and b"[" in data:
+        txt = data.decode(errors="replace")
+        for name in st.keys():
+            txt = txt.replace("[" + name + "]", unwrap(name, passphrase))
+        final_data = txt.encode()
+    req = urllib.request.Request(url, data=final_data or None, headers=final_headers, method=method)
     try:
         with urllib.request.urlopen(req) as resp:
             body = resp.read().decode(errors="replace")
-        log_event({"ev":"CALL","service":service,"url":url,"status":resp.status})
+        log_event({"ev":"CALL","method":method,"url":url,"status":resp.status})
+        print("STATUS:", resp.status)
         print("RESULT:"); print(body[:2000])
     except Exception as ex:
-        log_event({"ev":"CALL_FAIL","service":service,"url":url,"why":str(ex)[:120]})
+        log_event({"ev":"CALL_FAIL","method":method,"url":url,"why":str(ex)[:120]})
         print("CALL FAILED:", ex)
     return 0
 

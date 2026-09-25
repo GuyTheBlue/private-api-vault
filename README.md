@@ -19,6 +19,7 @@ python3 vault.py request <agent> <http> <expiry_min> <reason>   run the decision
 python3 vault.py pending                           show staged requests (passphrase)
 python3 vault.py decide <req_key> yes|no|other [msg]   TELEGRAM STUB: set Batman's verdict
 python3 vault.py resolve <req_key>                 agent returns and picks up the verdict
+python3 vault.py call <method> <url> [--header "Name:[key_name]"] [--data <json>]  substitute+send
 python3 vault.py lease                             active leases (passphrase)
 python3 vault.py ledger                            audit history (read-only)
 python3 vault.py recover                           set new passphrase via off-site recovery key
@@ -44,6 +45,7 @@ answer so the index/lookup logic is testable instantly (no live wait).
 - `deny.json` — ONE blanket deny list (signed, under `.vault/`)
 - `.vault/` — encrypted store, signed deny/lease, ledger (**never committed**)
 - `regression.sh` — automated regression suite (no real keys, isolated scratch)
+- `stub_endpoint.py` — local HTTP echo server to test the call path with no live API
 
 ## Tests
 Run `bash regression.sh` after any change — verifies encryption at rest,

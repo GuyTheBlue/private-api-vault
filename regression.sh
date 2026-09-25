@@ -133,12 +133,22 @@ K4=$(VAULT_PASS=$PASS python3 vault.py request x_timeout https://api.x 5 newthin
 R4=$(VAULT_PASS=$PASS python3 vault.py resolve "$K4")
 echo "$R4" | grep -qi "come back later" && ok "pending past window tells agent to come back" || bad "pending timeout wrong"
 
-# ---------- 16. crypto smoke (encryption at rest + internal send) ----------
-step "crypto smoke"
+# ---------- 16. crypto: add key + substitute+send via LOCAL STUB ----------
+step "crypto + substitute-send vs stub"
 VAULT_PASS=$PASS VAULT_VALUE=dummy_fal_key_ABC123 VAULT_REC=$REC python3 vault.py add fal >/dev/null 2>&1
 if grep -q 'ABC123' .vault/keys.json; then bad "key leaked at rest"; else ok "key encrypted at rest"; fi
-OUT=$(VAULT_PASS=$PASS python3 vault.py call fal https://httpbin.org/headers 2>/dev/null)
-echo "$OUT" | grep -q 'Bearer dummy_fal_key_ABC123' && ok "internal decrypt+send works" || bad "decrypt+send failed"
+# start the local stub endpoint on a scratch port
+PORT=18191
+cp /Volumes/Secure/private_api_vault/stub_endpoint.py .
+(python3 stub_endpoint.py $PORT >/dev/null 2>&1 &) 
+sleep 1
+OUT=$(VAULT_PASS=$PASS python3 vault.py call GET "http://127.0.0.1:$PORT/anything" \
+      --header "Authorization: Bearer [fal]" 2>/dev/null)
+echo "$OUT" | grep -q 'Bearer dummy_fal_key_ABC123' && ok "secret substituted into header internally" \
+  || bad "substitution into header failed"
+pkill -f "stub_endpoint.py $PORT" 2>/dev/null
+# secret must NOT be visible outside the call (still encrypted at rest)
+if grep -q 'ABC123' .vault/keys.json; then bad "key leaked after call"; else ok "key still encrypted after call"; fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi

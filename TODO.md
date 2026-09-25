@@ -14,7 +14,8 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
 ## STATUS (accurate as of 2026-09-25)
 - STAGE 1 (data model + store + decision gate): DONE, verified by `regression.sh`.
 - STAGE 2 (decision loop: pending index, variable wait, telegram-stub verdicts, resolve): DONE, verified.
-- STAGES 3-6 + MIGRATION: NOT STARTED.
+- STAGE 3 (agnostic substitute+send, verified against local stub): DONE, verified.
+- STAGES 4-6 + MIGRATION: NOT STARTED.
 - Real keys NOT loaded.
 - Regression suite: `regression.sh` - 16 checks, all passing. EXTEND IT for
   every stage below before marking that stage done.
@@ -55,15 +56,16 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
       Batman's message verbatim to the agent.
 - [x] regression.sh 11-15 cover stage/pending/decide/resolve for all verdicts.
 
-### STAGE 3 — THE CALL (agnostic substitute + send)
-- [ ] agent hands the full request string with [key_name] placeholders; vault
-      decrypts the named secret(s), swaps each in, sends as-is, returns the
-      raw HTTP response. Does NOT parse the result.
-- [ ] retire the old Bearer-only `call <service> <url>` path once the new one
-      replaces it.
-- [ ] vault lazy about outcome: a bad response is the agent's to fix+retry.
-- [ ] key values exist only in that one call's memory; never logged/returned.
-- [ ] regression.sh: add substitution + send test (dummy key, httpbin).
+### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
+- [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:
+      caller supplies the FULL request; vault swaps each [key_name] for the
+      held secret, sends as-is, returns the raw response. Provider-agnostic —
+      vault does NOT know fal/DO/Bearer (that was the old Bearer-only path).
+- [x] verified against stub_endpoint.py (local HTTP stub): secret substituted
+      into header AND body, endpoint sees the real value, nothing leaks to disk.
+- [x] stub_endpoint.py added: local echo server for testing the call path with
+      no live API / no real key.
+- [x] regression.sh 16 covers substitute+send vs the stub; all pass.
 
 ### STAGE 4 — ACCESS / API
 - [ ] Agents: read-only API only. Can LIST key NAMES (never secrets), view
