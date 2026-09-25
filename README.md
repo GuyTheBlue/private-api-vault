@@ -15,8 +15,8 @@ python3 vault.py init                              first run: set passphrase, mi
 python3 vault.py add  <service>                    store an encrypted key
 python3 vault.py list                              names only, never values
 python3 vault.py deny list|add|remove              manage the ONE deny list (passphrase)
-python3 vault.py keygen <profile>                  mint a .env key for a profile (Batman, shown once)
-python3 vault.py access list|add|remove            manage .env-key map (passphrase)
+python3 vault.py keygen <profile>                  mint a .env key for a profile (Batman, shown once) — robin refused
+python3 vault.py access list|add|remove            manage .env-key map (passphrase) — robin refused
 python3 vault.py request <agent> <http> <expiry_min> <reason>   run the decision gate
 python3 vault.py pending                           show staged requests (passphrase)
 python3 vault.py decide <req_key> yes|no|other [msg]   TELEGRAM STUB: set Batman's verdict

@@ -75,6 +75,7 @@ _DENY_TAG   = "gsq-vault-deny-v1"
 _LEASE_TAG  = "gsq-vault-lease-v1"
 _PENDING_TAG = "gsq-vault-pending-v1"
 _ACCESS_TAG = "gsq-vault-access-v1"
+PROTECTED_AGENTS = {"robin"}   # the overreacher: never issued a .env key, never granted
 WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
 
 def now_iso():
@@ -397,6 +398,10 @@ def cmd_keygen(argv, passphrase):
     # keygen <profile>  -> mint a .env key for a profile, register its hash
     if len(argv) < 1: print("usage: vault.py keygen <profile>"); return 1
     prof = argv[0]
+    if prof in PROTECTED_AGENTS:
+        print(f"Refused: {prof} is a protected agent and is never issued a .env key.")
+        log_event({"ev":"KEY_AUTH_REFUSED","profile":prof,"by":"batman","why":"protected"})
+        return 3
     keys, st = load_access(passphrase)
     if st != "ok":
         print("TAMPER DETECTED: access map unverifiable."); return 4
@@ -423,6 +428,10 @@ def cmd_access(argv, passphrase):
         return 0
     if sub == "add":
         if len(rest) < 2: print("usage: vault.py access add <profile> <key>"); return 1
+        if rest[0] in PROTECTED_AGENTS:
+            print(f"Refused: {rest[0]} is a protected agent - not registerable.")
+            log_event({"ev":"KEY_AUTH_REFUSED","profile":rest[0],"by":"batman","why":"protected"})
+            return 3
         keys[rest[0]] = key_hash(rest[1]); save_access(keys, passphrase)
         log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"add"})
         print(f"Registered .env key for {rest[0]}.")

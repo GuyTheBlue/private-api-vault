@@ -74,6 +74,10 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
   regression 18-20.
 - Update-password re-signs access.json too, so it doesn't fail closed after a
   passphrase change.
+- **robin is PROTECTED** (`PROTECTED_AGENTS`): `keygen` and `access add` refuse
+  to issue/register a key for robin, so the overreacher has NO key and every
+  attempt (no key, or flashing another profile's key -> ACCESS SNEAK) is
+  denied + logged. Covered by regression 21.
 
 ### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
 - [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:

@@ -47,13 +47,13 @@ import json
 r=json.load(open('.vault/deny.json')); r['data']['agents'].pop('robin',None)
 json.dump(r,open('.vault/deny.json','w'))
 PY
-E=$(green_key "$RKEY"; VAULT_AGENT_KEY="$RKEY" VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
+E=$(green_key "$LKEY"; VAULT_AGENT_KEY="$LKEY" VAULT_PASS=$PASS python3 vault.py request link https://x 0 r; echo "rc=$?")
 echo "$E" | grep -qi "TAMPER" && ok "edit detected, fail-closed" || bad "edit NOT detected"
 
 # ---------- 5. TAMPER: delete deny.json ----------
 step "tamper via delete"
 rm -f .vault/deny.json
-D=$(green_key "$RKEY"; VAULT_AGENT_KEY="$RKEY" VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
+D=$(green_key "$LKEY"; VAULT_AGENT_KEY="$LKEY" VAULT_PASS=$PASS python3 vault.py request link https://x 0 r; echo "rc=$?")
 echo "$D" | grep -qi "TAMPER" && ok "delete detected, fail-closed" || bad "delete NOT detected"
 
 # ---------- 6. rebuilt deny accepts legit Batman add/remove ----------
@@ -214,6 +214,15 @@ echo "$A19b" | grep -qi "DENIED\|not yours\|not registered" && ok "wrong key den
 step "identity ACCESS SNEAK"
 A20=$(green_key "testbotkey123"; VAULT_AGENT_KEY=testbotkey123 VAULT_PASS=passV2 python3 vault.py request evil https://api.y 5 "probe" 2>&1)
 echo "$A20" | grep -qi "ACCESS SNEAK\|not yours" && ok "rogue key (evil flashing testbot's) denied + logged" || bad "ACCESS SNEAK not caught: $A20"
+
+# ---------- 21. robin is PROTECTED: no key mintable, sneaks trip ----------
+step "robin protected (no key, never registerable)"
+kr=$(VAULT_PASS=passV2 python3 vault.py keygen robin 2>&1)
+echo "$kr" | grep -qi "Refused" && ok "keygen robin refused (protected)" || bad "keygen robin NOT refused: $kr"
+ar=$(VAULT_PASS=passV2 python3 vault.py access add robin fakered 2>&1)
+echo "$ar" | grep -qi "Refused" && ok "access add robin refused (protected)" || bad "access add robin NOT refused: $ar"
+sr=$(green_key "testbotkey123"; HERMES_HOME=/Users/guymeaker/.hermes/profiles/robin VAULT_AGENT_KEY=testbotkey123 VAULT_PASS=passV2 python3 vault.py request robin https://x 5 "grab" 2>&1)
+echo "$sr" | grep -qi "ACCESS SNEAK\|denied" && ok "robin flashing another's key denied" || bad "robin sneak NOT caught: $sr"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi
