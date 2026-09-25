@@ -384,6 +384,56 @@ def cmd_access(argv, passphrase):
         return 0
     print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
 
+def classify_request(http):
+    """Classify a request URL/substring against sensitive-API patterns.
+
+    Returns (verdict, detail): verdict is 'no_use' (refuse outright), 'flag'
+    (warn Batman before approval), or 'ok'. Built from analysing cloud-API
+    scopes that mint tokens, expose credentials, or touch account/team/security.
+    Matching is on substrings in the request string, so it catches the endpoint
+    regardless of the exact host or path formatting."""
+    low = http.lower()
+    NO_USE = [
+        # credential / secret exposure
+        ("database/view_credentials", "database credential access"),
+        ("/databases/", "managed-database endpoint"),
+        ("spaces_key/create_credentials", "creates a Spaces access key AND returns its secret"),
+        ("kubernetes/access_cluster", "downloads cluster credentials (kubeconfig)"),
+        ("kubeconfig", "cluster credentials"),
+        ("/credentials", "credential endpoint"),
+        ("access_token", "token issuance"),
+        ("create_token", "token creation"),
+        ("refresh_token", "token refresh/rotation"),
+        ("oauth", "OAuth token flow"),
+        ("/auth/", "authentication endpoint"),
+        # admin / full-access
+        ("function:admin", "serverless admin"),
+        ("functions:admin", "serverless admin"),
+        ("droplet:admin", "droplet console access"),
+        (":admin", "admin-level scope"),
+        # inference token minting
+        ("inference_token", "inference token management"),
+    ]
+    for pat, why in NO_USE:
+        if pat in low:
+            return "no_use", f"no-use rule hit ({why})"
+    FLAG = [
+        ("account:", "account details"),
+        ("/account", "account details"),
+        ("billing", "billing/invoice"),
+        ("organization", "organization/team"),
+        ("team_membership", "team membership"),
+        ("spaces_key", "Spaces key management"),
+        ("ssh_key", "SSH key management"),
+        ("/projects", "project management"),
+        ("/tokens", "token endpoints"),
+        ("/keys", "key endpoints"),
+    ]
+    for pat, why in FLAG:
+        if pat in low:
+            return "flag", f"sensitive scope ({why})"
+    return "ok", ""
+
 def cmd_request(argv, passphrase):
     if len(argv) < 3: print("usage: vault.py request <http> <expiry_min> <reason>"); return 1
     http = argv[0]
@@ -402,8 +452,23 @@ def cmd_request(argv, passphrase):
     agent = runner   # identity IS the running profile
     log_event({"ev":"IDENTITY","agent":agent,"outcome":"OK"})
 
+    # SENSITIVITY GATE: hard NO-USE vs flag-for-Batman. Runs BEFORE the lease
+    # so a live lease can't be used to smuggle a credential-mint call through.
+    verdict, detail = classify_request(http)
+    if verdict == "no_use":
+        log_event({"ev":"NO_USE","agent":agent,"http":http,"why":detail,"outcome":"DENY"})
+        print(f"DENIED: {detail}. 'Not in my city.'")
+        return 9
+    flagged = verdict == "flag"
+
     lease = active_lease(agent, "*", passphrase)
     if lease:
+        if flagged:
+            log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE_FLAG",
+                       "key":lease.get("key"),"why":detail})
+            print(f"WARNING: live lease would cover {agent}, but this is FLAGGED: {detail}")
+            print(f"Refusing without Batman. Ask again or get explicit approval.")
+            return 9
         log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE","key":lease.get("key")})
         print(f"ACTIVE LEASE covers {agent} (expires {lease['expires_iso']}). Making the call (Batman not asked).")
         return 0
@@ -419,11 +484,13 @@ def cmd_request(argv, passphrase):
         "agent": agent, "http": http, "reason": reason, "expiry_min": expiry,
         "asked_at": now_iso(), "asked_epoch": now_epoch(), "status": "pending",
         "msg": "", "lease_created": False,
+        "flag": detail if flagged else "",
     }
     save_pending(pending, passphrase)
     log_event({"ev":"PENDING","agent":agent,"http":http,"reason":reason,
-               "expiry_min":expiry,"req_key":req_key,"outcome":"ASK_BATMAN"})
-    print(f"{agent}: no lease. Staged with request key {req_key}; handed to Batman to approve.")
+               "expiry_min":expiry,"req_key":req_key,"outcome":"ASK_BATMAN","flag":detail if flagged else ""})
+    flag_txt = f"  [FLAGGED: {detail} - Batman, look before you approve]" if flagged else ""
+    print(f"{agent}: no lease. Staged with request key {req_key}; handed to Batman to approve.{flag_txt}")
     print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
     return 0
 

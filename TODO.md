@@ -75,6 +75,17 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
 - Deny list REMOVED (overkill). Robin handled purely by "never given a key".
 - Covered by regression 3-5.
 
+### SENSITIVITY GATE — no-use + flag for sensitive API calls ✅ built
+- `classify_request(http)` checks every request BEFORE the lease check, so a
+  live lease can't smuggle a credential-mint call through.
+- HARD NO-USE (refuse outright, "Not in my city."): credential/db endpoints,
+  spaces_key:create_credentials, kubeconfig/cluster creds, oauth/token issue,
+  *:admin scopes, inference_token. Built from DO scope analysis.
+- FLAG (warn Batman before approving): account, billing, organization/team,
+  spaces_key, ssh_key, projects, token/key endpoints. A flagged call during a
+  live lease is REFUSED (no auto-approval on sensitive calls). Covered by
+  regression 15.
+
 ### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
 - [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:
       caller supplies the FULL request; vault swaps each [key_name] for the

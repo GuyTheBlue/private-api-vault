@@ -145,5 +145,21 @@ elif [ "$BEFORE" = "$AFTER" ]; then ok "recovery key still decrypts after re-key
 else bad "recovery escrow broken by update"; fi
 PASS=passV2
 
+# ---------- 15. sensitivity gate: no-use refused, no-lease; flag on lease refused ----------
+step "sensitivity gate"
+# NO-USE: credential/db endpoint refused even with a live lease present
+S1=$(as_agent oracle https://api.digitalocean.com/v2/databases/abc/credentials 5 "get db creds")
+echo "$S1" | grep -qi "DENIED" && echo "$S1" | grep -qi "no-use" \
+  && ok "no-use credential endpoint refused" || bad "no-use NOT caught: $S1"
+S1b=$(as_agent oracle "KUBECONFIG download cluster keys" 5 "grab kube")
+echo "$S1b" | grep -qi "DENIED" && ok "no-use kubeconfig refused" || bad "kubeconfig NOT caught: $S1b"
+# FLAG: sensitive-but-not-forbidden -> staged with FLAGGED warning
+S2=$(as_agent oracle https://api.digitalocean.com/v2/billing/history 5 "check billing")
+echo "$S2" | grep -qi "FLAGGED" && ok "sensitive request flagged for Batman" || bad "billing NOT flagged: $S2"
+# FLAG during an active lease -> refused (can't smuggle via lease)
+S3=$(as_agent link https://api.digitalocean.com/v2/billing/history 5 "sneak billing via lease")
+echo "$S3" | grep -qi "WARNING\|flagged\|refusing" && ok "flagged request refused despite live lease" \
+  || bad "flagged-not-refused-via-lease: $S3"
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi

@@ -28,14 +28,16 @@ python3 vault.py update                           change the passphrase (needs c
 python3 vault.py status                            state overview
 ```
 
-The decision gate (`request`) first verifies WHO is knocking: the agent must
-present its profile `.env` key (`VAULT_AGENT_KEY`) and it must hash to what
-the vault holds for that profile name — a mismatch, a stolen key, or no key
-at all is denied and logged. Only a verified request is checked against the
-deny list and lease; a clean one is staged with a unique key and handed to
-Batman. The agent returns with that key (`resolve`) to pick up the verdict.
-While Telegram buttons land in Stage 5, `decide` stands in for Batman's
-answer so the index/lookup logic is testable instantly (no live wait).
+The decision gate (`request`) first verifies WHO is knocking: the running
+profile (from HOME env) must present a `.env` key registered to it — no key,
+or flashing another profile's key (ACCESS SNEAK), is denied and logged.
+Every request is then classified for sensitivity: credential/admin/token-mint
+endpoints are a hard NO-USE (refused outright), and account/billing/team
+calls are FLAGGED for Batman before approval. A clean request flows to the
+lease check, then is staged with a unique key and handed to Batman. The
+agent returns with that key (`resolve`) to pick up the verdict. While
+Telegram buttons land in Stage 5, `decide` stands in for Batman's answer so
+the index/lookup logic is testable instantly (no live wait).
 
 ## Security model
 - Keys are ciphertext at rest (`.vault/` is gitignored — never pushed).
