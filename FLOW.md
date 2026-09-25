@@ -8,40 +8,38 @@ and reports back. A key value never leaves the vault's process.
 
 ```mermaid
 flowchart TD
-    AG[Agent arrives: I have an endpoint<br/>and need N keys I don't hold<br/>hands over the request string<br/>with [key_name] placeholders]
+    AG["Agent arrives: I have an endpoint and need N keys I don't hold. I hand over the request with key placeholders"]
 
-    AG --> V[vault: the DECISION]
-    V --> C{Holds those keys?}
-    C -- No --> D[HELL-NO<br/>log: unknown / not held]
-    C -- Yes --> E{Agent allowed?<br/>e.g. robin blocked}
-    E -- No --> F[HELL-NO<br/>log: agent blocked]
-    E -- Yes --> S{Approve how?}
+    AG --> V["vault: the DECISION"]
+    V --> C{"Holds those keys?"}
+    C -- "No" --> D["HELL-NO: unknown key"]
+    C -- "Yes" --> E{"Agent allowed? robin is blocked"}
+    E -- "No" --> F["HELL-NO: agent blocked"]
+    E -- "Yes" --> S{"Approve how?"}
 
-    S -- has expiry date, still live --> K[AUTO-GRANT<br/>log GRANT by=rule]
-    S -- routine for this agent --> K1[AUTO-GRANT<br/>log GRANT by=rule]
-    S -- needs-bats --> I[Ask Batman<br/>Telegram YES / NO]
-    S -- expired, or none --> I
+    S -- "expiry date still live" --> K["AUTO-GRANT by rule"]
+    S -- "routine for this agent" --> K["AUTO-GRANT by rule"]
+    S -- "needs-bats" --> I["Ask Batman (Telegram YES or NO)"]
+    S -- "no expiry or expired" --> I
 
-    I --> N{Batman verdict}
-    N -- YES --> L[GRANT + start lease<br/>log GRANT by=batman]
-    N -- NO --> P[REJECT<br/>log REJECT]
-    N -- other --> Q[log OTHER<br/>reason, no action]
+    I --> N{"Batman verdict"}
+    N -- "YES" --> L["GRANT + start lease"]
+    N -- "NO" --> P["REJECT"]
+    N -- "other" --> Q["log OTHER, no action"]
 
-    K --> SUB[Vault: substitute each<br/>placeholder with the held secret]
-    K1 --> SUB
+    K --> SUB["Vault swaps every key placeholder for the held secret"]
     L --> SUB
 
-    SUB --> SEND[Send the request as-is]
-    SEND --> RES[Result or error<br/>-> returned to the AGENT]
-    RES --> R{Worked?}
-    R -- Yes --> DONE[Return result to agent<br/>log CALL]
-    R -- No: malformed / bad response --> FIX[Agent fixes the request<br/>and retries]
+    SUB --> SEND["Send the request as-is"]
+    SEND --> RES["Result or error returned to the AGENT"]
+    RES --> R{"Worked?"}
+    R -- "Yes" --> DONE["Return result to agent"]
+    R -- "No: malformed or bad response" --> FIX["Agent fixes and retries"]
     FIX --> SUB
-
-    R -- No: agent concludes<br/>it is not working /<br/>token invalid --> PLAN[Agent plans the fix<br/>and asks Batman is it worth<br/>continuing]
+    R -- "No: agent decides it is not working or the token is invalid" --> PLAN["Agent plans and asks Batman if it is worth continuing"]
     PLAN --> I
 
-    D --> Z[ledger.jsonl]
+    D --> Z["ledger.jsonl"]
     F --> Z
     P --> Z
     Q --> Z
@@ -58,14 +56,14 @@ flowchart TD
   finished request string containing `[key_name]` markers, swaps in the
   secrets it holds, sends it, returns whatever comes back.
 - **If a call comes back badly formed -> the AGENT fixes and retries.** The
-  vault doesn't debug the request; it just tries/refuses the substitution
-  and hands the result back.
+  vault doesn't debug the request; it just tries the send and hands the
+  result back.
 - **If the agent concludes the thing is genuinely not working (endpoint
   dead, token invalid, money burning) -> the agent plans and asks Batman,
   not the vault.** That's a "is it worth continuing?" decision, so it
   routes to the same approval path — you.
 - **One endpoint may need several secrets.** The vault holds however many
-  keys a service needs and replaces every marker it finds. "Three or one"
-  is automatic — it just swaps every placeholder.
+  keys a service needs and replaces every mark placeholder it finds. So
+  "three secrets or one" is automatic — it swaps every placeholder.
 
-Every decision -> the ledger. Nothing unlogged.
+Every decision goes to the ledger. Nothing unlogged.
