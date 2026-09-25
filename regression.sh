@@ -20,6 +20,16 @@ REC=$(VAULT_PASS=$PASS python3 vault.py init | grep -A1 'RECOVERY KEY' | tail -1
 export VAULT_REC=$REC
 [ -n "$REC" ] && ok "init minted recovery key" || bad "init failed"
 
+# mint a unique .env key for each agent the later tests impersonate
+GKEY=$(VAULT_PASS=$PASS python3 vault.py keygen spielberg | grep '^VAULT_AGENT_KEY=' | cut -d= -f2)
+>robinkey; >linkkey; >oraclekey; >xotherkey; >xnokey; >xtimekey
+for who in robin link oracle x_other x_no x_timeout; do
+  VAULT_PASS=$PASS python3 vault.py keygen "$who" 2>/dev/null | grep '^VAULT_AGENT_KEY=' | cut -d= -f2 > "/tmp/vk_$who"
+done
+RKEY=$(cat /tmp/vk_robin); LKEY=$(cat /tmp/vk_link); OKEY=$(cat /tmp/vk_oracle)
+XOK=$(cat /tmp/vk_x_other); XNK=$(cat /tmp/vk_x_no); XTK=$(cat /tmp/vk_x_timeout)
+green_key(){ export VAULT_AGENT_KEY=$1; }
+
 # ---------- 2. deny list seeded signed ----------
 step "deny seeded"
 OUT=$(VAULT_PASS=$PASS python3 vault.py deny list)
@@ -27,7 +37,7 @@ echo "$OUT" | grep -q robin && ok "deny list seeded with robin" || bad "robin no
 
 # ---------- 3. denied agent refused ----------
 step "denied agent refused"
-VIR=$(VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
+VIR=$(green_key "$RKEY"; VAULT_AGENT_KEY="$RKEY" VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
 echo "$VIR" | grep -qi "DENIED" && ok "robin request denied" || bad "robin was not denied"
 
 # ---------- 4. TAMPER: edit deny.json (strip robin) ----------
@@ -37,13 +47,13 @@ import json
 r=json.load(open('.vault/deny.json')); r['data']['agents'].pop('robin',None)
 json.dump(r,open('.vault/deny.json','w'))
 PY
-E=$(VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
+E=$(green_key "$RKEY"; VAULT_AGENT_KEY="$RKEY" VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
 echo "$E" | grep -qi "TAMPER" && ok "edit detected, fail-closed" || bad "edit NOT detected"
 
 # ---------- 5. TAMPER: delete deny.json ----------
 step "tamper via delete"
 rm -f .vault/deny.json
-D=$(VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
+D=$(green_key "$RKEY"; VAULT_AGENT_KEY="$RKEY" VAULT_PASS=$PASS python3 vault.py request robin https://x 0 r; echo "rc=$?")
 echo "$D" | grep -qi "TAMPER" && ok "delete detected, fail-closed" || bad "delete NOT detected"
 
 # ---------- 6. rebuilt deny accepts legit Batman add/remove ----------
@@ -89,13 +99,13 @@ echo "$LL" | grep -q link && ok "live lease present (Batman not asked)" || bad "
 
 # ---------- 9. clean agent with live lease -> makes call, no Batman ----------
 step "lease short-circuits to call"
-CR=$(VAULT_PASS=$PASS python3 vault.py request link https://api.vast.ai 5 "grab box"; echo "rc=$?")
+CR=$(green_key "$LKEY"; VAULT_AGENT_KEY="$LKEY" VAULT_PASS=$PASS python3 vault.py request link https://api.vast.ai 5 "grab box"; echo "rc=$?")
 echo "$CR" | grep -qi "ACTIVE LEASE" && ok "lease covers link, Batman not asked" || bad "lease not used"
 
 # ---------- 11. stage request -> pending entry with unique key ----------
 step "stage request"
 export VAULT_WAIT_MIN=0
-K1=$(VAULT_PASS=$PASS python3 vault.py request oracle https://api.fal.ai/render 5 "render pic" \
+K1=$(green_key "$OKEY"; VAULT_AGENT_KEY="$OKEY" VAULT_PASS=$PASS python3 vault.py request oracle https://api.fal.ai/render 5 "render pic" \
      | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
 [ -n "$K1" ] && ok "request staged with unique key $K1" || bad "no request key"
 PV=$(VAULT_PASS=$PASS python3 vault.py pending)
@@ -111,7 +121,7 @@ echo "$LV" | grep -q oracle && ok "lease created for oracle" || bad "lease not c
 
 # ---------- 13. decide OTHER -> resolve denies + verbatim message ----------
 step "verdict OTHER denies + verbatim message"
-K2=$(VAULT_PASS=$PASS python3 vault.py request x_other https://api.vast.ai 10 'grab box' \
+K2=$(green_key "$XOK"; VAULT_AGENT_KEY="$XOK" VAULT_PASS=$PASS python3 vault.py request x_other https://api.vast.ai 10 'grab box' \
      | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
 MSG="message me on Instagram, tell me what's going on"
 VAULT_PASS=$PASS python3 vault.py decide "$K2" other "$MSG" >/dev/null
@@ -121,7 +131,7 @@ echo "$R2" | grep -qi "Denied" && echo "$R2" | grep -qF "$MSG" \
 
 # ---------- 14. decide NO -> resolve denies ----------
 step "verdict NO denies"
-K3=$(VAULT_PASS=$PASS python3 vault.py request x_no https://api.r2 5 verify \
+K3=$(green_key "$XNK"; VAULT_AGENT_KEY="$XNK" VAULT_PASS=$PASS python3 vault.py request x_no https://api.r2 5 verify \
      | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
 VAULT_PASS=$PASS python3 vault.py decide "$K3" no >/dev/null
 R3=$(VAULT_PASS=$PASS python3 vault.py resolve "$K3")
@@ -129,7 +139,7 @@ echo "$R3" | grep -qi "Denied" && ok "NO resolve denies" || bad "NO resolve wron
 
 # ---------- 15. resolve at WAIT_MIN=0 with no verdict -> not approved, come back ----------
 step "pending timeout (window 0)"
-K4=$(VAULT_PASS=$PASS python3 vault.py request x_timeout https://api.x 5 newthing \
+K4=$(green_key "$XTK"; VAULT_AGENT_KEY="$XTK" VAULT_PASS=$PASS python3 vault.py request x_timeout https://api.x 5 newthing \
      | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
 R4=$(VAULT_PASS=$PASS python3 vault.py resolve "$K4")
 echo "$R4" | grep -qi "come back later" && ok "pending past window tells agent to come back" || bad "pending timeout wrong"
@@ -186,6 +196,24 @@ if [ -z "$BEFORE" ] || [ -z "$AFTER" ]; then bad "recovery decrypt produced empt
 elif [ "$BEFORE" = "$AFTER" ]; then ok "recovery key still decrypts same value after re-key"
 else bad "recovery escrow broken by update"; fi
 PASS=passV2
+
+# ---------- 18. identity: legit .env key passes ----------
+step "identity legit key"
+VAULT_PASS=passV2 python3 vault.py access add testbot testbotkey123 2>/dev/null
+A18=$(green_key "testbotkey123"; VAULT_AGENT_KEY=testbotkey123 VAULT_PASS=passV2 python3 vault.py request testbot https://api.y 5 "probe" 2>&1)
+echo "$A18" | grep -qi "request key\|no lease" && ok "legit key lets request through to decision" || bad "legit key wrongly blocked: $A18"
+
+# ---------- 19. identity: no key / wrong key denied ----------
+step "identity no key denied"
+A19=$(green_key ""; VAULT_AGENT_KEY= VAULT_PASS=passV2 python3 vault.py request testbot https://api.y 5 "probe" 2>&1)
+echo "$A19" | grep -qi "DENIED\|Access denied" && ok "no key denied" || bad "no key NOT denied: $A19"
+A19b=$(green_key "wrongkey"; VAULT_AGENT_KEY=wrongkey VAULT_PASS=passV2 python3 vault.py request testbot https://api.y 5 "probe" 2>&1)
+echo "$A19b" | grep -qi "DENIED\|not yours\|not registered" && ok "wrong key denied" || bad "wrong key NOT denied: $A19b"
+
+# ---------- 20. identity: ACCESS SNEAK (flash another profile's .env key) ----------
+step "identity ACCESS SNEAK"
+A20=$(green_key "testbotkey123"; VAULT_AGENT_KEY=testbotkey123 VAULT_PASS=passV2 python3 vault.py request evil https://api.y 5 "probe" 2>&1)
+echo "$A20" | grep -qi "ACCESS SNEAK\|not yours" && ok "rogue key (evil flashing testbot's) denied + logged" || bad "ACCESS SNEAK not caught: $A20"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi

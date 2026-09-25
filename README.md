@@ -15,6 +15,8 @@ python3 vault.py init                              first run: set passphrase, mi
 python3 vault.py add  <service>                    store an encrypted key
 python3 vault.py list                              names only, never values
 python3 vault.py deny list|add|remove              manage the ONE deny list (passphrase)
+python3 vault.py keygen <profile>                  mint a .env key for a profile (Batman, shown once)
+python3 vault.py access list|add|remove            manage .env-key map (passphrase)
 python3 vault.py request <agent> <http> <expiry_min> <reason>   run the decision gate
 python3 vault.py pending                           show staged requests (passphrase)
 python3 vault.py decide <req_key> yes|no|other [msg]   TELEGRAM STUB: set Batman's verdict
@@ -27,8 +29,11 @@ python3 vault.py update                           change the passphrase (needs c
 python3 vault.py status                            state overview
 ```
 
-The decision gate (`request`) checks the deny list first, then a live
-lease; only a clean request is staged with a unique key and handed to
+The decision gate (`request`) first verifies WHO is knocking: the agent must
+present its profile `.env` key (`VAULT_AGENT_KEY`) and it must hash to what
+the vault holds for that profile name — a mismatch, a stolen key, or no key
+at all is denied and logged. Only a verified request is checked against the
+deny list and lease; a clean one is staged with a unique key and handed to
 Batman. The agent returns with that key (`resolve`) to pick up the verdict.
 While Telegram buttons land in Stage 5, `decide` stands in for Batman's
 answer so the index/lookup logic is testable instantly (no live wait).

@@ -60,6 +60,21 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
       data key, orphaning the recovery escrow); fixed with `rekey_passphrase`
       that re-wraps ONLY the passphrase layer. Covered by regression 17.
 
+### IDENTITY — who is knocking? (.env keys)  ✅ built
+- Not a real fingerprint (agents share the OS user; a determined process can
+  forge env) - it is a TRIP-WIRE to stop sloppy/lying behaviour, which is its
+  stated purpose (Batman's words).
+- `keygen <profile>` (Batman) mints a profile .env key; vault stores its HASH
+  in .vault/access.json (signed like deny). Plaintext shown once.
+- `access list|add|remove` manages the map under the passphrase.
+- `request` now REQUIRES VAULT_AGENT_KEY (from the profile's .env). It checks
+  presented-key hash against the registered key for the claimed agent and,
+  best-effort, against HERMES_HOME (which profile actually launched). Classic
+  "robin grabs link's .env" -> ACCESS SNEAK, denied + logged. Covered by
+  regression 18-20.
+- Update-password re-signs access.json too, so it doesn't fail closed after a
+  passphrase change.
+
 ### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
 - [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:
       caller supplies the FULL request; vault swaps each [key_name] for the

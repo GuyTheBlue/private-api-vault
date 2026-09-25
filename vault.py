@@ -68,11 +68,13 @@ KF   = os.path.join(VT, "keys.json")
 DF   = os.path.join(VT, "deny.json")
 LF_  = os.path.join(VT, "leases.json")
 PF   = os.path.join(VT, "pending.json")
+AF   = os.path.join(VT, "access.json")
 LG   = os.path.join(VT, "ledger.jsonl")
 
 _DENY_TAG   = "gsq-vault-deny-v1"
 _LEASE_TAG  = "gsq-vault-lease-v1"
 _PENDING_TAG = "gsq-vault-pending-v1"
+_ACCESS_TAG = "gsq-vault-access-v1"
 WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
 
 def now_iso():
@@ -217,6 +219,18 @@ def load_deny(passphrase):
 def save_deny(agents, passphrase):
     _signed_save(DF, {"agents": agents}, passphrase, _DENY_TAG)
 
+# ---------- access map (profile -> hash of its .env key) ----------
+def load_access(passphrase):
+    """Return {profile: key_hash}, status. Signed + fail-closed like deny."""
+    data, st = _signed_load(AF, passphrase, _ACCESS_TAG, {})
+    return data.get("keys", {}), st
+
+def save_access(keys, passphrase):
+    _signed_save(AF, {"keys": keys}, passphrase, _ACCESS_TAG)
+
+def key_hash(k):
+    return _hl.sha256(k.encode()).hexdigest()
+
 # ---------- lease file (ACTIVE grants only; tamper-evident, purged) ----------
 def load_leases(passphrase):
     return _signed_load(LF_, passphrase, _LEASE_TAG, [])
@@ -272,6 +286,7 @@ def cmd_init():
     save_deny({"robin": "the overreacher (coordinator)"}, p1)
     save_leases([], p1)
     save_pending({}, p1)
+    save_access({}, p1)
     log_event({"ev":"INIT","by":"batman","recovery_minted":True})
     print("\n" + "="*60)
     print("STORE THIS RECOVERY KEY OFF-SITE - shown ONCE, never again, not saved here:")
@@ -338,6 +353,91 @@ def cmd_deny(argv, passphrase):
         return 0
     print("usage: vault.py deny list|add <agent> [reason]|remove <agent>"); return 1
 
+def who_is_running():
+    """Best-effort answer to 'who launched this?'. Reads the Hermes profile
+    from HERMES_HOME so the vault knows WHICH process is knocking, not just
+    what it claims. Caveat: env can be forged by a determined same-user
+    process (see Stage 4 for the real wall) - this trips up sloppy/lying
+    agents, which is its purpose."""
+    hh = os.environ.get("HERMES_HOME", "")
+    if "profiles/" in hh:
+        return hh.split("profiles/")[-1].strip("/")
+    if hh:
+        return "default"
+    return ""
+
+def verify_identity(claimed, passphrase):
+    """Check the agent's presented key against the access map.
+
+    Returns (ok: bool, reason: str). The presented key must hash to the
+    registered key of (a) the profile actually running (HERMES_HOME) - i.e.
+    the .env key matches the profile, so you can't flash another profile's
+    .env key and get away with it."""
+    keys, st = load_access(passphrase)
+    if st != "ok":
+        return False, "TAMPER DETECTED: access map unverifiable. Fail-closed: DENIED."
+    presented = os.environ.get("VAULT_AGENT_KEY", "").strip()
+    if not presented:
+        return False, f"No .env key presented ({claimed}) - access denied."
+    ph = key_hash(presented)
+    # which profile does this key actually belong to?
+    owner = next((p for p, h in keys.items() if h == ph), None)
+    runner = who_is_running()
+    # must hash to the caller's own registered key
+    if keys.get(claimed) != ph:
+        if owner and owner != claimed:
+            return False, f"ACCESS SNEAK: you flashed {owner}'s key while claiming {claimed}. That key is not yours."
+        return False, f"Access denied for {claimed}: .env key not registered to you."
+    # runner cross-check (best-effort; catches the classic swap)
+    if runner and runner != claimed:
+        return False, f"ACCESS SNEAK: process is running as {runner} but claims {claimed}. Denied and logged."
+    return True, ""
+
+def cmd_keygen(argv, passphrase):
+    # keygen <profile>  -> mint a .env key for a profile, register its hash
+    if len(argv) < 1: print("usage: vault.py keygen <profile>"); return 1
+    prof = argv[0]
+    keys, st = load_access(passphrase)
+    if st != "ok":
+        print("TAMPER DETECTED: access map unverifiable."); return 4
+    new = secrets.token_urlsafe(24)
+    keys[prof] = key_hash(new)
+    save_access(keys, passphrase)
+    log_event({"ev":"KEY_AUTH","profile":prof,"by":"batman"})
+    print(f"Registered .env key for {prof}. ADD THIS LINE to {prof}'s .env (shown once):")
+    print(f"VAULT_AGENT_KEY={new}")
+    print(f"(stored as hash {keys[prof][:8]}... - plaintext never saved)")
+    return 0
+
+def cmd_access(argv, passphrase):
+    if not argv:
+        print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
+    sub, rest = argv[0], argv[1:]
+    keys, st = load_access(passphrase)
+    if st != "ok":
+        print("TAMPER DETECTED: access map unverifiable."); return 4
+    if sub == "list":
+        if not keys: print("(no registered .env keys)")
+        for p, h in keys.items():
+            print(f"{p}   (hash {h[:8]}...)")
+        return 0
+    if sub == "add":
+        if len(rest) < 2: print("usage: vault.py access add <profile> <key>"); return 1
+        keys[rest[0]] = key_hash(rest[1]); save_access(keys, passphrase)
+        log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"add"})
+        print(f"Registered .env key for {rest[0]}.")
+        return 0
+    if sub == "remove":
+        if not rest: print("usage: vault.py access remove <profile>"); return 1
+        if rest[0] in keys:
+            del keys[rest[0]]; save_access(keys, passphrase)
+            log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"remove"})
+            print(f"Removed .env access for {rest[0]}.")
+        else:
+            print(f"no .env key registered for {rest[0]}.")
+        return 0
+    print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
+
 def cmd_request(argv, passphrase):
     if len(argv) < 4: print("usage: vault.py request <agent> <http> <expiry_min> <reason>"); return 1
     agent, http = argv[0], argv[1]
@@ -346,6 +446,15 @@ def cmd_request(argv, passphrase):
     except ValueError:
         print("expiry must be minutes (0 = no lift requested)"); return 1
     reason = " ".join(argv[3:])
+
+    # WHO is knocking? .env key must match, else deny + log.
+    ok_id, why = verify_identity(agent, passphrase)
+    if not ok_id:
+        log_event({"ev":"ACCESS_DENIED","agent":agent,"runner":who_is_running(),
+                   "outcome":"DENY","why":why})
+        print(f"DENIED: {why} 'Not in my city.'")
+        return 3
+    log_event({"ev":"IDENTITY","agent":agent,"runner":who_is_running(),"outcome":"OK"})
 
     agents, st = load_deny(passphrase)
     if st != "ok":
@@ -554,6 +663,7 @@ def cmd_recover():
     save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
     save_leases([], p1)
     save_pending({}, p1)
+    save_access({}, p1)
     log_event({"ev":"RECOVER","by":"batman"})
     print("Recovered. Keys + signed files re-encrypted/re-signed under new passphrase.")
     return 0
@@ -597,6 +707,8 @@ def cmd_update(passphrase):
     save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
     save_leases(leases, p1)
     save_pending(pending, p1)
+    access_keys, ast = load_access(passphrase)
+    save_access(access_keys if ast == "ok" else {}, p1)
     log_event({"ev":"UPDATE_PASS","by":"batman","keys":len(store)})
     print(f"Passphrase updated. {len(store)} key(s) re-encrypted; deny/lease/pending re-signed.")
     print("The OLD passphrase no longer works; the recovery key still does.")
@@ -639,6 +751,8 @@ def main():
         "add": lambda: cmd_add(args, passphrase),
         "list": lambda: cmd_list(),
         "deny": lambda: cmd_deny(args, passphrase),
+        "keygen": lambda: cmd_keygen(args, passphrase),
+        "access": lambda: cmd_access(args, passphrase),
         "request": lambda: cmd_request(args, passphrase),
         "pending": lambda: cmd_pending(passphrase),
         "decide": lambda: cmd_decide(args, passphrase),
