@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Regression suite for vault.py - runs WITHOUT touching the real store (always
-# copies to an isolated scratch dir). Run after ANY change to vault.py.
-#   Usage: bash regression.sh [path/to/vault.py]
+# Regression suite for ciphergate.py - runs WITHOUT touching the real store (always
+# copies to an isolated scratch dir). Run after ANY change to ciphergate.py.
+#   Usage: bash regression.sh [path/to/ciphergate.py]
 set -uo pipefail
-VAULT_PY="${1:-/Volumes/Secure/private_api_vault/vault.py}"
+VAULT_PY="${1:-/Volumes/Secure/private_api_vault/ciphergate.py}"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 cp "$VAULT_PY" "$SCRATCH/"
+# legacy alias so the helper fns' `python3 vault.py` invocations still resolve
+cp "$VAULT_PY" "$SCRATCH/vault.py"
 cd "$SCRATCH"
 PASS=testpass123
 FAIL=0

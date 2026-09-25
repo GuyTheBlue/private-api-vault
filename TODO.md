@@ -1,4 +1,4 @@
-# private-api-vault — BUILD PLAN (source of truth)
+# CipherGate — BUILD PLAN (source of truth)
 # Consolidated from QUESTIONS.md answers. Design locked. Real keys NOT loaded.
 # Checkboxes: [x] = built + verified. Updated as reality changes — a stale plan
 # misleads every agent, so keep this current before starting anything.

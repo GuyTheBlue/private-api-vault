@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vault.py - the Gsquared Productions API-key Vault (terminal).
+ciphergate.py - the Gsquared Productions API-key vault (terminal).
 
 WHAT IT IS
   A single terminal program that HOLDS the API keys ENCRYPTED, keeps a signed
@@ -38,20 +38,20 @@ TAMPER-EVIDENCE
   True process isolation is Stage 4.
 
 USAGE (all terminal)
-  python3 vault.py init                            first run: set passphrase, mint recovery key
-  python3 vault.py add    <service>                add/update an encrypted key
-  python3 vault.py list                             names only, never values
-  python3 vault.py keygen <profile>                mint a .env key for a profile (shown once)
-  python3 vault.py access list|add|remove          manage .env-key map (passphrase)
-  python3 vault.py request <http> <expiry_min> <reason>   run the decision gate (identity from env)
-  python3 vault.py pending                         show pending requests (passphrase)
-  python3 vault.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
-  python3 vault.py resolve <req_key>               agent returns: pick up the verdict
-  python3 vault.py lease                           active leases (passphrase)
-  python3 vault.py ledger                          audit history (read-only)
-  python3 vault.py recover                         new passphrase via off-site recovery key
-  python3 vault.py update                          change the passphrase (needs current pass)
-  python3 vault.py status                          where things live + counts
+  python3 ciphergate.py init                            first run: set passphrase, mint recovery key
+  python3 ciphergate.py add    <service>                add/update an encrypted key
+  python3 ciphergate.py list                             names only, never values
+  python3 ciphergate.py keygen <profile>                mint a .env key for a profile (shown once)
+  python3 ciphergate.py access list|add|remove          manage .env-key map (passphrase)
+  python3 ciphergate.py request <http> <expiry_min> <reason>   run the decision gate (identity from env)
+  python3 ciphergate.py pending                         show pending requests (passphrase)
+  python3 ciphergate.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
+  python3 ciphergate.py resolve <req_key>               agent returns: pick up the verdict
+  python3 ciphergate.py lease                           active leases (passphrase)
+  python3 ciphergate.py ledger                          audit history (read-only)
+  python3 ciphergate.py recover                         new passphrase via off-site recovery key
+  python3 ciphergate.py update                          change the passphrase (needs current pass)
+  python3 ciphergate.py status                          where things live + counts
 
 DIRECTORY (all .vault/ gitignored)
   .vault/keys.json       the encrypted key store
@@ -726,11 +726,30 @@ def cmd_ledger():
               e.get("req_key",""), e.get("service",""), e.get("why",""))
     return 0
 
+def _banner():
+    """CipherGate ASCII logo: a keyhole with a bar through it = no entry
+    until the gate (Batman) opens it. Shown on launch and init."""
+    logo = r"""
+      ______
+     / ____ \      C I P H E R G A T E
+    |  O  O  |     the keyhole gate
+     \_|||__/     ____________________
+       | |        |   locked until   |
+     __| |___     |   Batman opens   |
+    /  |||||  \   |   the keyhole    |
+    \__________/  |__________________|
+    """
+    print(logo)
+    print("   API keys held encrypted; every call waits on the gate.\n")
+
 def main():
     os.chmod(VT, 0o700) if os.path.exists(VT) else None
     if len(sys.argv) < 2:
+        _banner(); print("no command given. Try `python3 ciphergate.py --help`:")
         print(__doc__); return 0
     c = sys.argv[1]
+    if c == "--help":
+        _banner(); print(__doc__); return 0
     args = sys.argv[2:]
     no_pass = c in ("init", "list", "ledger")
     passphrase = "" if no_pass else _pass()
