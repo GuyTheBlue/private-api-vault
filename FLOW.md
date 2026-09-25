@@ -7,53 +7,58 @@ to an agent; the vault decrypts internally and makes the call itself.
 ```mermaid
 flowchart TD
     A[Agent asks for key<br/>service + agent + reason] --> B[vault.py allow]
-    B --> C{Key for this<br/>service exists?}
-    C -- No --> D[HELL-NO<br/>log DECIDE: no such key]
-    C -- Yes --> E{Agent on<br/>blocked list?<br/>e.g. robin}
-    E -- Yes --> F[HELL-NO<br/>log DECIDE: blocked agent]
-    E -- No --> G{What does<br/>rules.json say?}
 
-    G -- routine for this agent --> H[AUTO-GRANT<br/>log GRANT by=rules]
-    G -- needs-bats --> I[Ask Batman]
-    G -- never --> J[NEVER<br/>refuse, log]
+    B --> C{Key exists?}
+    C -- No --> D[HELL-NO<br/>log: no such key]
+    C -- Yes --> E{Agent blocked?<br/>e.g. robin}
+    E -- Yes --> F[HELL-NO<br/>log: blocked agent]
+    E -- No --> H{Already approved?<br/>fresh lease still live<br/>for this service+agent}
+    H -- Yes --> RUN[Run the call]
+    H -- No --> G{What does<br/>rules.json say?}
 
-    I --> K{How is Batman reached?}
-    K -- Local terminal --> L[input yes / no]
-    K -- Remote session --> M[Telegram buttons<br/>YES / NO]
+    G -- never --> J[REFUSE<br/>log: never]
+    G -- routine --> K[AUTO-GRANT<br/>log GRANT by=rules]
+    K --> RUN
+    G -- needs-bats --> I[Ask Batman<br/>Telegram YES / NO buttons]
 
-    L --> N{Batman verdict}
-    M --> N{Batman verdict}
-    N -- YES --> O[GRANT<br/>with session lease<br/>log GRANT by=batman]
+    I --> N{Batman verdict}
+    N -- YES --> L[GRANT + start lease<br/>log GRANT by=batman]
     N -- NO --> P[REJECT<br/>log REJECT]
-    N -- other --> Q[log OTHER<br/>reason noted,<br/>no action]
+    N -- other --> Q[log OTHER<br/>reason, no action]
 
-    O --> R{Lease expired?<br/>took longer than<br/>session lease}
-    R -- No --> S[Run the call]
-    R -- Yes --> I
+    L --> RUN
 
-    S --> T{Call's auth profile}
-    T -- fal --> U[Key: <key> header]
-    T -- DigitalOcean --> V[token: <key> header]
-    T -- vast / rest --> W[Authorization: Bearer <key>]
+    RUN --> T{Call's auth profile}
+    T -- fal --> U[Key-header: Authorization: Key ...]
+    T -- DigitalOcean --> V[token-header]
+    T -- vast / rest --> W[Authorization: Bearer ...]
 
-    U --> X[key used only inside<br/>the call, never shown]
-    V --> X
-    W --> X
-    X --> Y[Return result to agent]
-    D --> Z[ledger.jsonl: whole audit trail]
+    U --> XS[key used only inside the call, never shown]
+    V --> XS
+    W --> XS
+    XS --> Y[Return result to agent]
+
+    D --> Z[ledger.jsonl]
     F --> Z
-    H --> Z
     J --> Z
+    K --> Z
     P --> Z
     Q --> Z
+    H -- fresh lease reused --> R[log GRANT lease-reused]
+    R --> XS
     Y --> Z
 ```
 
 ## Legend
 
-- **routine**   — low-stakes, same agent always gets it (auto-grant, still logged)
-- **needs-bats** — anything costing money or risky: Batman must tap YES
-- **never**     — rules say no circumstances release it
-- **lease**     — approval is only valid for N minutes; a long job re-asks
+- **routine**    — low-stakes, same agent always gets it → auto-grant (still logged)
+- **needs-bats** — anything costing money or risky → Batman must tap YES
+- **never**      — rules release it under no circumstances
+- **lease**      — an approval is valid for N minutes; while it's live we do NOT
+                  re-ask Batman (reused and logged as lease-reused). Only an
+                  expired lease triggers a fresh ask.
 
-Every node → the ledger. Nothing happens unlogged.
+Rule of thumb: Batman is only ever asked when a key is genuinely needed,
+not already approved, and rules mark it needs-bats. Fast paths (routine,
+live lease) never bother him. Every node → the ledger; nothing happens
+unlogged.
