@@ -3,58 +3,59 @@
 vault.py - the Gsquared Productions API-key Vault (terminal).
 
 WHAT IT IS
-  A single terminal program that HOLDS the API keys ENCRYPTED, keeps a
-  TAMPER-EVIDENT deny list, lease file and pending-request index, keeps a
-  LEDGER of history, and when allowed decrypts a key INTERNALLY and makes
-  the https call itself, returning only the RESULT. A key is never handed
-  to an agent, never written mid-session, never shown, never returned.
+  A single terminal program that HOLDS the API keys ENCRYPTED, keeps a signed
+  ACCESS list (profile -> hash of its .env key), a lease file, a pending
+  index, and a LEDGER, and when allowed decrypts a key INTERNALLY and makes
+  the https call itself, returning only the RESULT. A key is never handed to
+  an agent, never written mid-session, never shown, never returned.
 
-THE DECISION (the vault's one job)
+WHO IS KNOCKING (the gate)
+  The vault decides identity purely from the HOME env (HERMES_HOME -> which
+  profile is running) plus the .env key that profile presents. Batman puts a
+  key in each profile's .env and registers its hash in the access list. A
+  profile without a key (robin) simply owns nothing in the list and can't
+  pass; one that flashes someone else's key is caught (running profile !=
+  key owner) -> ACCESS SNEAK, denied + logged. No deny list needed.
+
+THE DECISION
   A request decides like this:
-    1. deny list FIRST: agent on it -> DENIED with the reason, done.
-    2. active unexpired lease for agent+key -> make the call (Batman
-       NOT bothered). Entry purged on expiry.
-    3. otherwise -> write a PENDING entry with a UNIQUE request key, log
-       it, and ask Batman. When the agent returns with the key, the vault
-       resolves it: pending -> come back later; YES -> lease + call; NO
-       or other -> deny (other passes Batman's message verbatim).
+    1. WHO: running profile must present a key registered to it, else DENIED.
+    2. active unexpired lease for agent -> make the call (Batman NOT asked).
+    3. otherwise -> write a PENDING entry with a UNIQUE request key, log it,
+       and ask Batman. When the agent returns with the key, the vault
+       resolves it: pending -> come back later; YES -> lease + call; NO or
+       other -> deny (other passes Batman's message verbatim).
   There is NO pass-through / "go as usual".
 
 STAGE-2 TELEGRAM STUB (for now)
   Real Telegram buttons come in Stage 5. Today `decide <key> yes|no|other
   [msg]` stands in for Batman's answer so the index/lookup logic can be
-  tested instantly instead of waiting on live Telegram. The wait window is
-  variable via env VAULT_WAIT_MIN (default 5) so short timeouts are easy.
+  tested instantly. Wait window is variable via env VAULT_WAIT_MIN.
 
-TAMPER-EVIDENCE (why agents can't edit the deny list / leases / pending)
-  deny.json, leases.json and pending.json carry an HMAC keyed to the vault
-  PASSphrase. Agents do not hold the passphrase, so they cannot re-sign a
-  file they edit. A direct edit or delete leaves a bad / missing signature
-  -> the vault FAILS CLOSED (logs a TAMPER alarm, treats the agent as
-  DENIED) rather than silently resetting.
-
-  LIMITATION (honest): agents run as the same OS user, so they can OPEN
-  the files but cannot forge a valid signature without the vault
-  passphrase. True process isolation - the vault as its own service - is
-  Stage 4. Until then the passphrase gate is the wall.
+TAMPER-EVIDENCE
+  access/lease/pending JSON carry an HMAC keyed to the vault PASSphrase.
+  Agents don't hold the passphrase, so a direct edit or delete FAILS CLOSED.
+  True process isolation is Stage 4.
 
 USAGE (all terminal)
   python3 vault.py init                            first run: set passphrase, mint recovery key
   python3 vault.py add    <service>                add/update an encrypted key
   python3 vault.py list                             names only, never values
-  python3 vault.py deny    list|add|remove        manage the deny list (passphrase)
-  python3 vault.py request <agent> <http> <expiry_min> <reason>   stage a decision
+  python3 vault.py keygen <profile>                mint a .env key for a profile (shown once)
+  python3 vault.py access list|add|remove          manage .env-key map (passphrase)
+  python3 vault.py request <http> <expiry_min> <reason>   run the decision gate (identity from env)
   python3 vault.py pending                         show pending requests (passphrase)
   python3 vault.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
-  python3 vault.py resolve <req_key>              agent returns: pick up the verdict
+  python3 vault.py resolve <req_key>               agent returns: pick up the verdict
   python3 vault.py lease                           active leases (passphrase)
   python3 vault.py ledger                          audit history (read-only)
   python3 vault.py recover                         new passphrase via off-site recovery key
+  python3 vault.py update                          change the passphrase (needs current pass)
   python3 vault.py status                          where things live + counts
 
-DIRECTORY (all under lock on this machine, gitignored)
+DIRECTORY (all .vault/ gitignored)
   .vault/keys.json       the encrypted key store
-  .vault/deny.json       blanket deny list - signed, passphrase-keyed
+  .vault/access.json     profile -> key-hash map (signed, passphrase-keyed)
   .vault/leases.json     ACTIVE grants only, signed, purged on expiry
   .vault/pending.json    staged requests by unique key, signed
   .vault/ledger.jsonl    append-only history
@@ -65,17 +66,14 @@ import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess
 BASE = os.path.dirname(os.path.abspath(__file__))
 VT   = os.path.join(BASE, ".vault")
 KF   = os.path.join(VT, "keys.json")
-DF   = os.path.join(VT, "deny.json")
+AF   = os.path.join(VT, "access.json")
 LF_  = os.path.join(VT, "leases.json")
 PF   = os.path.join(VT, "pending.json")
-AF   = os.path.join(VT, "access.json")
 LG   = os.path.join(VT, "ledger.jsonl")
 
-_DENY_TAG   = "gsq-vault-deny-v1"
 _LEASE_TAG  = "gsq-vault-lease-v1"
 _PENDING_TAG = "gsq-vault-pending-v1"
 _ACCESS_TAG = "gsq-vault-access-v1"
-PROTECTED_AGENTS = {"robin"}   # the overreacher: never issued a .env key, never granted
 WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
 
 def now_iso():
@@ -140,15 +138,12 @@ def add_key(service, value, passphrase, rec_key, keep_rec=None):
 
 def rekey_passphrase(service, old_pass, new_pass):
     """Change ONLY the passphrase layer of a key. Keeps the data key, the
-    ciphertext, iv1, and the recovery escrow IDENTICAL (so the recovery key
-    still works after a passphrase change). Refreshes salt + passphrase
-    KDF-derived key + iv2 that wrap the data key."""
+    ciphertext, iv1, and the recovery escrow IDENTICAL so the recovery key
+    still works after a passphrase change."""
     e = load_store()[service]
-    # recover the data key via the OLD passphrase
     salt_old = base64.b64decode(e["salt"])
     pk_old = derive_key(old_pass, salt_old)
     dk = aes_crypt(pk_old, e["iv2"], base64.b64decode(e["dk_pass"]), decrypt=True).hex()
-    # re-wrap the SAME data key under the NEW passphrase
     salt_new = os.urandom(16)
     pk_new = derive_key(new_pass, salt_new)
     iv2_new = os.urandom(16).hex()
@@ -194,7 +189,6 @@ def _check_bundle(raw, key):
     mine = _hmac.new(key, _canon(data), _hl.sha256).hexdigest()
     return data if _hmac.compare_digest(mine, sig) else None
 
-# ---------- signed JSON helpers ----------
 def _signed_load(path, passphrase, tag, default):
     """Load (data, status). status 'ok'|'missing'|'tampered'."""
     if not os.path.exists(path):
@@ -212,17 +206,9 @@ def _signed_save(path, data, passphrase, tag):
     json.dump(_bundle(data, sign_key(passphrase, tag)), open(path, "w"), indent=2)
     os.chmod(path, 0o600)
 
-# ---------- deny list (one blanket list; tamper-evident, fail-closed) ----------
-def load_deny(passphrase):
-    data, st = _signed_load(DF, passphrase, _DENY_TAG, {})
-    return data.get("agents", {}), st
-
-def save_deny(agents, passphrase):
-    _signed_save(DF, {"agents": agents}, passphrase, _DENY_TAG)
-
 # ---------- access map (profile -> hash of its .env key) ----------
 def load_access(passphrase):
-    """Return {profile: key_hash}, status. Signed + fail-closed like deny."""
+    """Return (keys_map, status). Signed + fail-closed like the other files."""
     data, st = _signed_load(AF, passphrase, _ACCESS_TAG, {})
     return data.get("keys", {}), st
 
@@ -261,7 +247,7 @@ def active_lease(agent, key, passphrase):
 # ---------- pending index (staged by unique request key) ----------
 def load_pending(passphrase):
     data, st = _signed_load(PF, passphrase, _PENDING_TAG, {})
-    return data, st   # dict keyed by req_key
+    return data, st
 
 def save_pending(pending, passphrase):
     _signed_save(PF, pending, passphrase, _PENDING_TAG)
@@ -284,17 +270,16 @@ def cmd_init():
         print("Mismatch."); return 1
     rk = new_rec_key()
     save_store({})
-    save_deny({"robin": "the overreacher (coordinator)"}, p1)
+    save_access({}, p1)
     save_leases([], p1)
     save_pending({}, p1)
-    save_access({}, p1)
     log_event({"ev":"INIT","by":"batman","recovery_minted":True})
     print("\n" + "="*60)
     print("STORE THIS RECOVERY KEY OFF-SITE - shown ONCE, never again, not saved here:")
     print(rk)
     print("="*60)
     os.chmod(VT, 0o700)
-    print("Vault initialised. `add <service>` to store a key; `deny list` to see the deny list.")
+    print("Vault initialised. `add <service>` to store a key; `keygen <profile>` to issue an agent key.")
     return 0
 
 def cmd_add(argv, passphrase):
@@ -320,46 +305,10 @@ def cmd_list():
         print(f"{s}  (encrypted, {len(base64.b64decode(e['ct']))} bytes, added {e['created']})")
     return 0
 
-def cmd_deny(argv, passphrase):
-    if not argv:
-        print("usage: vault.py deny list|add <agent> [reason]|remove <agent>"); return 1
-    sub, rest = argv[0], argv[1:]
-    agents, st = load_deny(passphrase)
-    if st != "ok":
-        log_event({"ev":"TAMPER","file":"deny","outcome":"FAIL_CLOSED"})
-        print("TAMPER DETECTED: deny list signature invalid or missing. Fail-closed: agents DENIED.")
-        return 4
-    if sub == "list":
-        if not agents: print("(deny list empty)")
-        for a, why in agents.items():
-            print(f"{a}  (reason: {why})")
-        return 0
-    if sub == "add":
-        if not rest: print("usage: vault.py deny add <agent> [reason]"); return 1
-        who = rest[0]; why = " ".join(rest[1:]) or "no specific reason on file"
-        agents[who] = why
-        save_deny(agents, passphrase)
-        log_event({"ev":"DENY_ADD","agent":who,"by":"batman"})
-        print(f"{who} added to deny list (reason: {why}).")
-        return 0
-    if sub == "remove":
-        if not rest: print("usage: vault.py deny remove <agent>"); return 1
-        who = rest[0]
-        if who in agents:
-            del agents[who]; save_deny(agents, passphrase)
-            log_event({"ev":"DENY_REMOVE","agent":who,"by":"batman"})
-            print(f"{who} removed from deny list.")
-        else:
-            print(f"{who} not on the deny list.")
-        return 0
-    print("usage: vault.py deny list|add <agent> [reason]|remove <agent>"); return 1
-
 def who_is_running():
-    """Best-effort answer to 'who launched this?'. Reads the Hermes profile
-    from HERMES_HOME so the vault knows WHICH process is knocking, not just
-    what it claims. Caveat: env can be forged by a determined same-user
-    process (see Stage 4 for the real wall) - this trips up sloppy/lying
-    agents, which is its purpose."""
+    """Answer 'who launched this?' from the Hermes HOME env. Caveat: env can
+    be forged by a determined same-user process (Stage 4 is the real wall);
+    this trips up sloppy/lying agents, which is its purpose."""
     hh = os.environ.get("HERMES_HOME", "")
     if "profiles/" in hh:
         return hh.split("profiles/")[-1].strip("/")
@@ -367,41 +316,33 @@ def who_is_running():
         return "default"
     return ""
 
-def verify_identity(claimed, passphrase):
-    """Check the agent's presented key against the access map.
-
-    Returns (ok: bool, reason: str). The presented key must hash to the
-    registered key of (a) the profile actually running (HERMES_HOME) - i.e.
-    the .env key matches the profile, so you can't flash another profile's
-    .env key and get away with it."""
+def verify_identity(passphrase):
+    """Return (runner, ok, reason). The vault decides WHO is knocking purely
+    from HOME env (HERMES_HOME -> runner) + the key it presents. A profile
+    only ever has the key Batman put in its .env; a profile without one
+    (robin) owns nothing in the list and can't pass. Flash another profile's
+    key and the running profile won't own it -> ACCESS SNEAK."""
+    runner = who_is_running()
     keys, st = load_access(passphrase)
     if st != "ok":
-        return False, "TAMPER DETECTED: access map unverifiable. Fail-closed: DENIED."
+        return runner, False, "TAMPER DETECTED: access map unverifiable. Fail-closed: DENIED."
     presented = os.environ.get("VAULT_AGENT_KEY", "").strip()
     if not presented:
-        return False, f"No .env key presented ({claimed}) - access denied."
+        return runner, False, "No .env key presented - access denied."
+    if not runner:
+        return runner, False, "Cannot identify which profile is running (no HERMES_HOME). Access denied."
     ph = key_hash(presented)
-    # which profile does this key actually belong to?
-    owner = next((p for p, h in keys.items() if h == ph), None)
-    runner = who_is_running()
-    # must hash to the caller's own registered key
-    if keys.get(claimed) != ph:
-        if owner and owner != claimed:
-            return False, f"ACCESS SNEAK: you flashed {owner}'s key while claiming {claimed}. That key is not yours."
-        return False, f"Access denied for {claimed}: .env key not registered to you."
-    # runner cross-check (best-effort; catches the classic swap)
-    if runner and runner != claimed:
-        return False, f"ACCESS SNEAK: process is running as {runner} but claims {claimed}. Denied and logged."
-    return True, ""
+    if keys.get(runner) != ph:
+        owner = next((p for p, h in keys.items() if h == ph), None)
+        if owner and owner != runner:
+            return runner, False, f"ACCESS SNEAK: you flashed {owner}'s key while running as {runner}. That key is not yours."
+        return runner, False, f"No key registered for {runner}. Access denied."
+    return runner, True, ""
 
 def cmd_keygen(argv, passphrase):
     # keygen <profile>  -> mint a .env key for a profile, register its hash
     if len(argv) < 1: print("usage: vault.py keygen <profile>"); return 1
     prof = argv[0]
-    if prof in PROTECTED_AGENTS:
-        print(f"Refused: {prof} is a protected agent and is never issued a .env key.")
-        log_event({"ev":"KEY_AUTH_REFUSED","profile":prof,"by":"batman","why":"protected"})
-        return 3
     keys, st = load_access(passphrase)
     if st != "ok":
         print("TAMPER DETECTED: access map unverifiable."); return 4
@@ -428,10 +369,6 @@ def cmd_access(argv, passphrase):
         return 0
     if sub == "add":
         if len(rest) < 2: print("usage: vault.py access add <profile> <key>"); return 1
-        if rest[0] in PROTECTED_AGENTS:
-            print(f"Refused: {rest[0]} is a protected agent - not registerable.")
-            log_event({"ev":"KEY_AUTH_REFUSED","profile":rest[0],"by":"batman","why":"protected"})
-            return 3
         keys[rest[0]] = key_hash(rest[1]); save_access(keys, passphrase)
         log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"add"})
         print(f"Registered .env key for {rest[0]}.")
@@ -448,32 +385,22 @@ def cmd_access(argv, passphrase):
     print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
 
 def cmd_request(argv, passphrase):
-    if len(argv) < 4: print("usage: vault.py request <agent> <http> <expiry_min> <reason>"); return 1
-    agent, http = argv[0], argv[1]
+    if len(argv) < 3: print("usage: vault.py request <http> <expiry_min> <reason>"); return 1
+    http = argv[0]
     try:
-        expiry = int(argv[2])
+        expiry = int(argv[1])
     except ValueError:
         print("expiry must be minutes (0 = no lift requested)"); return 1
-    reason = " ".join(argv[3:])
+    reason = " ".join(argv[2:])
 
-    # WHO is knocking? .env key must match, else deny + log.
-    ok_id, why = verify_identity(agent, passphrase)
+    # WHO is knocking? runner derives from HOME env; its key must own it.
+    runner, ok_id, why = verify_identity(passphrase)
     if not ok_id:
-        log_event({"ev":"ACCESS_DENIED","agent":agent,"runner":who_is_running(),
-                   "outcome":"DENY","why":why})
+        log_event({"ev":"ACCESS_DENIED","runner":runner,"outcome":"DENY","why":why})
         print(f"DENIED: {why} 'Not in my city.'")
         return 3
-    log_event({"ev":"IDENTITY","agent":agent,"runner":who_is_running(),"outcome":"OK"})
-
-    agents, st = load_deny(passphrase)
-    if st != "ok":
-        log_event({"ev":"TAMPER","file":"deny","agent":agent,"outcome":"FAIL_CLOSED"})
-        print("TAMPER DETECTED: deny list unverifiable. Fail-closed: DENIED.")
-        return 4
-    if agent in agents:
-        log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"DENY","by":"list","why":agents[agent]})
-        print(f"DENIED: {agent} is on the deny list - {agents[agent]}. 'Not in my city.'")
-        return 2
+    agent = runner   # identity IS the running profile
+    log_event({"ev":"IDENTITY","agent":agent,"outcome":"OK"})
 
     lease = active_lease(agent, "*", passphrase)
     if lease:
@@ -566,7 +493,6 @@ def cmd_resolve(argv, passphrase):
     # verdict decided
     e2 = pending.pop(req_key) if e["status"] in ("yes", "no", "other") else e
     if e2["status"] == "yes":
-        # create a lease for the granted window, then make the call (Stage 3 swaps real keys)
         leases, lst = load_leases(passphrase)
         if lst != "ok":
             print("TAMPER DETECTED: lease file unverifiable.")
@@ -627,7 +553,6 @@ def cmd_call(argv, passphrase):
         data = b""
     if data is None:
         data = bytes()
-    # substitute every [key_name] placeholder with the held secret
     def sub(s):
         if isinstance(s, str) and "[" in s:
             out = s
@@ -668,22 +593,18 @@ def cmd_recover():
     for s in list(load_store().keys()):
         plain = unwrap_rec(s, rk)
         add_key(s, plain, p1, rk)
-    agents, _ = load_deny(rk)
-    save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
+    keys, ak = load_access(rk)
+    save_access(keys if ak == "ok" else {}, p1)
     save_leases([], p1)
     save_pending({}, p1)
-    save_access({}, p1)
     log_event({"ev":"RECOVER","by":"batman"})
     print("Recovered. Keys + signed files re-encrypted/re-signed under new passphrase.")
     return 0
 
 def cmd_update(passphrase):
     # update-password: change the vault passphrase (needs the CURRENT one).
-    # Re-encrypts each key's passphrase layer under the new passphrase, keeps
-    # the recovery escrow intact, re-signs deny/lease/pending files.
     if not os.path.exists(KF):
         print("No store. Run `init` first."); return 1
-    # 1) verify the current passphrase by decrypting one real key
     store = load_store()
     if not store:
         print("Store has no keys yet - cannot validate current passphrase. Add a key first.")
@@ -694,46 +615,37 @@ def cmd_update(passphrase):
     except Exception:
         print("Current passphrase rejected. It must match the one the keys were stored under.")
         return 1
-    # 2) capture the live signed-file state under the OLD passphrase
-    agents, dst = load_deny(passphrase)
-    if dst != "ok":
-        print("TAMPER DETECTED: deny list invalid. Cannot update (fail-closed)."); return 4
     leases, lst = purge_expired(passphrase)
     pending, pst = load_pending(passphrase)
     if lst != "ok" or pst != "ok":
         print("TAMPER DETECTED: lease or pending file invalid. Cannot update (fail-closed)."); return 4
-    # 3) new passphrase: use a DIFFERENT prompt/env key than the current one
     p1 = ask("VAULT_NEW_PASS", "New passphrase: "); p2 = ask("VAULT_NEW_PASS", "Repeat: ")
     if p1 != p2: print("Mismatch."); return 1
     if p1 == passphrase:
         print("New passphrase is identical to current - no change made.")
         return 1
-    # 4) re-wrap every key's passphrase layer ONLY (data key, ct, iv1 and
-    #    recovery escrow stay identical, so the recovery key still works)
     for s in list(store.keys()):
         rekey_passphrase(s, passphrase, p1)
-    # 5) re-sign the tamper-evident files under the new passphrase
-    save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
     save_leases(leases, p1)
     save_pending(pending, p1)
     access_keys, ast = load_access(passphrase)
     save_access(access_keys if ast == "ok" else {}, p1)
     log_event({"ev":"UPDATE_PASS","by":"batman","keys":len(store)})
-    print(f"Passphrase updated. {len(store)} key(s) re-encrypted; deny/lease/pending re-signed.")
+    print(f"Passphrase updated. {len(store)} key(s) re-encrypted; lease/pending/access re-signed.")
     print("The OLD passphrase no longer works; the recovery key still does.")
     return 0
 
 def cmd_status(passphrase):
     st = load_store()
-    agents, dst = load_deny(passphrase)
+    keys, ast = load_access(passphrase)
     leases, lst = purge_expired(passphrase)
     pending, pst = load_pending(passphrase)
-    print(f"vault dir     : {VT}")
-    print(f"services      : {len(st)}")
-    print(f"deny list     : {', '.join(agents.keys()) or '(none)'}  [{dst}]")
-    print(f"active leases : {len(leases)}  [{lst}]")
-    print(f"pending asks  : {len(pending)}  [{pst}]")
-    print(f"ledger lines  : {sum(1 for _ in open(LG)) if os.path.exists(LG) else 0}")
+    print(f"vault dir      : {VT}")
+    print(f"services       : {len(st)}")
+    print(f"access keys    : {', '.join(keys.keys()) or '(none)'}  [{ast}]")
+    print(f"active leases  : {len(leases)}  [{lst}]")
+    print(f"pending asks   : {len(pending)}  [{pst}]")
+    print(f"ledger lines   : {sum(1 for _ in open(LG)) if os.path.exists(LG) else 0}")
     return 0
 
 def cmd_ledger():
@@ -759,7 +671,6 @@ def main():
         "init": lambda: cmd_init(),
         "add": lambda: cmd_add(args, passphrase),
         "list": lambda: cmd_list(),
-        "deny": lambda: cmd_deny(args, passphrase),
         "keygen": lambda: cmd_keygen(args, passphrase),
         "access": lambda: cmd_access(args, passphrase),
         "request": lambda: cmd_request(args, passphrase),

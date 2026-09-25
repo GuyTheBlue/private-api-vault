@@ -2,11 +2,11 @@
 
 Terminal API-key vault for the Gsquared Productions fleet.
 
-Holds API keys encrypted, keeps a tamper-evident deny list, tracks active
-leases, keeps an audit ledger, and — when allowed — decrypts a key
-internally and makes the HTTPS call itself, returning only the result. A
-key is never handed to an agent, never written mid-session, never shown,
-never returned by the API.
+Holds API keys encrypted, keeps a signed access map (profile -> hash of its
+.env key), tracks active leases, keeps an audit ledger, and — when allowed —
+decrypts a key internally and makes the HTTPS call itself, returning only
+the result. A key is never handed to an agent, never written mid-session,
+never shown, never returned by the API.
 
 ## Commands (all terminal)
 
@@ -14,10 +14,9 @@ never returned by the API.
 python3 vault.py init                              first run: set passphrase, mint off-site recovery key
 python3 vault.py add  <service>                    store an encrypted key
 python3 vault.py list                              names only, never values
-python3 vault.py deny list|add|remove              manage the ONE deny list (passphrase)
-python3 vault.py keygen <profile>                  mint a .env key for a profile (Batman, shown once) — robin refused
-python3 vault.py access list|add|remove            manage .env-key map (passphrase) — robin refused
-python3 vault.py request <agent> <http> <expiry_min> <reason>   run the decision gate
+python3 vault.py keygen <profile>                  mint a .env key for a profile (shown once)
+python3 vault.py access list|add|remove            manage .env-key map (passphrase)
+python3 vault.py request <http> <expiry_min> <reason>   run the decision gate (identity from env)
 python3 vault.py pending                           show staged requests (passphrase)
 python3 vault.py decide <req_key> yes|no|other [msg]   TELEGRAM STUB: set Batman's verdict
 python3 vault.py resolve <req_key>                 agent returns and picks up the verdict
@@ -40,7 +39,7 @@ answer so the index/lookup logic is testable instantly (no live wait).
 
 ## Security model
 - Keys are ciphertext at rest (`.vault/` is gitignored — never pushed).
-- deny.json + leases.json are HMAC-signed with the passphrase, so a direct
+- access.json + leases.json are HMAC-signed with the passphrase, so a direct
   edit or delete FAILS CLOSED (tamper detected) instead of silently resetting.
 - Passphrase (or macOS Keychain, later) + an off-site recovery key are the
   two pieces that can unwrap; neither sits in the repo.
@@ -48,12 +47,12 @@ answer so the index/lookup logic is testable instantly (no live wait).
 
 ## Files
 - `vault.py` — the program
-- `deny.json` — ONE blanket deny list (signed, under `.vault/`)
-- `.vault/` — encrypted store, signed deny/lease, ledger (**never committed**)
+- `access.json` — profile -> hash of its .env key (signed, under `.vault/`)
+- `.vault/` — encrypted store, signed access/lease/pending, ledger (**never committed**)
 - `regression.sh` — automated regression suite (no real keys, isolated scratch)
 - `stub_endpoint.py` — local HTTP echo server to test the call path with no live API
 
 ## Tests
 Run `bash regression.sh` after any change — verifies encryption at rest,
-the deny gate, tamper fail-closed (edit + delete), lease purge, and no
-plaintext anywhere. Full plan + status in `TODO.md`.
+the identity gate (no key / ACCESS SNEAK), tamper fail-closed, lease purge,
+and no plaintext anywhere. Full plan + status in `TODO.md`.

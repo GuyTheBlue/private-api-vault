@@ -60,24 +60,20 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
       data key, orphaning the recovery escrow); fixed with `rekey_passphrase`
       that re-wraps ONLY the passphrase layer. Covered by regression 17.
 
-### IDENTITY — who is knocking? (.env keys)  ✅ built
-- Not a real fingerprint (agents share the OS user; a determined process can
-  forge env) - it is a TRIP-WIRE to stop sloppy/lying behaviour, which is its
-  stated purpose (Batman's words).
-- `keygen <profile>` (Batman) mints a profile .env key; vault stores its HASH
-  in .vault/access.json (signed like deny). Plaintext shown once.
+### IDENTITY — who is knocking? (.env keys + HOME env)  ✅ built
+- SIMPLIFIED (Batman): NO deny list, NO robin special-casing. The program is
+  generic. Vault decides WHO purely from HOME env (HERMES_HOME -> who's
+  running) + the .env key it presents.
+- `keygen <profile>` (Batman) mints a .env key; vault stores its HASH in
+  .vault/access.json (signed like lease/pending). Plaintext shown once.
 - `access list|add|remove` manages the map under the passphrase.
-- `request` now REQUIRES VAULT_AGENT_KEY (from the profile's .env). It checks
-  presented-key hash against the registered key for the claimed agent and,
-  best-effort, against HERMES_HOME (which profile actually launched). Classic
-  "robin grabs link's .env" -> ACCESS SNEAK, denied + logged. Covered by
-  regression 18-20.
-- Update-password re-signs access.json too, so it doesn't fail closed after a
-  passphrase change.
-- **robin is PROTECTED** (`PROTECTED_AGENTS`): `keygen` and `access add` refuse
-  to issue/register a key for robin, so the overreacher has NO key and every
-  attempt (no key, or flashing another profile's key -> ACCESS SNEAK) is
-  denied + logged. Covered by regression 21.
+- `request` REQUIRES VAULT_AGENT_KEY + HERMES_HOME. A profile with no key
+  (robin is simply never issued one) owns nothing in the list and can't pass;
+  flashing another profile's key -> ACCESS SNEAK, denied + logged.
+- `request` signature is now `request <http> <expiry_min> <reason>` - agent
+  identity is DERIVED from the environment, never claimed as an argument.
+- Deny list REMOVED (overkill). Robin handled purely by "never given a key".
+- Covered by regression 3-5.
 
 ### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
 - [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:
