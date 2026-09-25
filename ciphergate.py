@@ -726,60 +726,65 @@ def cmd_ledger():
               e.get("req_key",""), e.get("service",""), e.get("why",""))
     return 0
 
+CYAN = "\033[38;5;51m"
+RESET = "\033[0m"
+
+def _print_cyan(logo_lines):
+    for line in logo_lines:
+        print(f"{CYAN}{line}{RESET}")
+
 def _banner():
-    """CipherGate intro: render the REAL logo (logo.jpg -> art_ansi.txt) as
-    truecolor half-block terminal art, 2 px/cell. Falls back to a compact
-    ASCII keyhole when the art file is absent or the terminal has no color."""
-    art = os.path.join(os.path.dirname(os.path.abspath(__file__)), "art_ansi.txt")
-    if os.path.exists(art) and os.environ.get("TERM") and "color" in os.environ.get("COLORTERM", "").lower():
-        try:
-            with open(art, encoding="utf-8") as f:
-                for line in f:
-                    sys.stdout.write(line.rstrip("\n") + "\n")
-            sys.stdout.write("\n")
-            print("   CipherGate — Secure API Routing\n")
-            print("   API keys held encrypted; every call waits on the gate.\n")
-            return
-        except Exception:
-            pass  # fall through to ASCII
-    logo = r"""
-                                    ::                                               ::
-                                    :                                                 :
-                                    :                    :::::::::                    :
-                                    :                 ::          :::                 :
-                                    :               ::               :                :
-                                    :              ::                 :               :
-                                    :              :                   :              :
-                                    :              :                   :              :
-                                    :              :                   :              :
-                                    :              ::                 :               :
-                                    :                :              ::                :
-                                    :                  :          ::                  :
-                                    :                   :         :                   :
-                                    :                  :           :                  :
-                                    :                 ::           :                  :
-                                    :                 :             :                 :
-                                    :                 :             :                 :
-                                    :                :               :                :
-                                    :               ::               :                :
-                                    :               :                 :               :
-                                    :              ::                 ::              :
-                                    :                    :: ::                        :
-                                    :                                                 :
-                                                     :                :
-
-
-                    ::::     :               :                           ::::
-                   :                  :     ::  :                 ::    :                 ::::      : :
-                  :          ::    ::   ::  ::   ::  ::   ::  :::  ::  ::         :: ::   ::      ::   :
-                   :         ::    ::   ::  ::    :  ::   :   ::       ::   ::   :   ::   ::      ::   :
-                    :       :::    ::: ::   ::    :   ::      ::       :::: ::   :   ::    ::::    ::
-                                   ::
-    """
-    print(logo)
-    print()
-    print("   CipherGate — Secure API Routing\n")
-    print("   API keys held encrypted; every call waits on the gate.\n")
+    """CipherGate intro: render Batman's keyhole art (keyhole_art.txt) in cyan
+    phosphor, no clear, no leading blank lines — the keyhole prints first thing.
+    The art file is the source of truth; edits change the banner directly."""
+    art = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keyhole_art.txt")
+    try:
+        with open(art, encoding="utf-8") as f:
+            raw = [ln.rstrip("\n") for ln in f]
+        # strip leading + trailing blank lines so ONLY the art prints first
+        while raw and raw[0] == "":
+            raw.pop(0)
+        while raw and raw[-1] == "":
+            raw.pop()
+        logo_lines = [ln for ln in raw if ln.strip()]
+        print("\n\n")                        # breathing space: two blank lines above the keyhole
+        _print_cyan(logo_lines)
+        print()
+        print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
+        return
+    except Exception:
+        logo_lines = [
+            "                                  ,▄▄▓██████▓▄▄,",
+            "                              ▄▓██████████████████▓▄",
+            "                            ▄██████████▀▀▀▀██████████▄",
+            "                           ████████▀          ▀████████",
+            "                          ████████              ████████",
+            "                         ████████                ████████",
+            "                         ████████                ████████",
+            "                          ████████              ████████",
+            "                           ████████▄          ▄████████",
+            "                            ▀█████████▄    ▄█████████▀",
+            "                              ▀████████    ████████▀",
+            "                               ████████    ████████",
+            "                              ████████      ████████",
+            "                             ████████        ████████",
+            "                            ████████          ████████",
+            "                           ████████            ████████",
+            "                          ████████              ████████",
+            "                         ████████████████████████████████",
+            "                         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "",
+            " ██████╗██╗██████╗ ██╗  ██╗███████╗██████╗  ██████╗  █████╗ ████████╗███████╗",
+            "██╔════╝██║██╔══██╗██║  ██║██╔════╝██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
+            "██║     ██║██████╔╝███████║█████╗  ██████╔╝██║  ███╗███████║   ██║   █████╗  ",
+            "██║     ██║██╔═══╝ ██╔══██║██╔══╝  ██╔══██╗██║   ██║██╔══██║   ██║   ██╔══╝  ",
+            "╚██████╗██║██║     ██║  ██║███████╗██║  ██║╚██████╔╝██║  ██║   ██║   ███████╗",
+            " ╚══════╝╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+        ]
+        print("\n\n")                        # breathing space above the fallback keyhole too
+        _print_cyan(logo_lines)
+        print()
+        print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
 
 def main():
     os.chmod(VT, 0o700) if os.path.exists(VT) else None
