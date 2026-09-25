@@ -1,5 +1,7 @@
 # private-api-vault — BUILD PLAN (source of truth)
 # Consolidated from QUESTIONS.md answers. Design locked. Real keys NOT loaded.
+# Checkboxes: [x] = built + verified. Updated as reality changes — a stale plan
+# misleads every agent, so keep this current before starting anything.
 
 ## THE DESIGN IN ONE PARAGRAPH
 The vault (aka "secure api proxy") holds every secret ENCRYPTED. Agents
@@ -9,64 +11,70 @@ an active lease, then — only if needed — asks Batman on Telegram. On a YES
 it swaps the held secret into the request string and sends it, returning
 the HTTP result. Secrets never leave, never log, never return to an agent.
 
-## STATUS
-Encrypted store, rules gate, recovery, old Bearer-only call: WORKING (built).
-Everything below matching THIS design: NOT BUILT YET.
+## STATUS (accurate as of 2026-09-25)
+- STAGE 1 (data model + store + decision gate): DONE, verified by `regression.sh`.
+- STAGES 2–6 + MIGRATION: NOT STARTED.
+- Real keys NOT loaded.
+- Regression suite: `regression.sh` — 11 checks, all passing. EXTEND IT for
+  every stage below before marking that stage done.
 
 ========================================================
 ## BUILD STAGES (in order)
 ========================================================
 
-### STAGE 1 — DATA MODEL + STORE
-- [ ] deny list: ONE blanket list. Agents on it = denied, reason given.
-      Field per entry: agent, reason. Seeded with `robin`. Stored in vault
-      store JSON (not repo). Only Batman (via login) edits.
-- [ ] request record shape: {http, reason, expiry}
-      - expiry 0 = no lift requested (default)
-      - expiry 1+ = minutes the agent asks to keep this active
-- [ ] ledger: append-only history. Each entry gets a UNIQUE request key.
-      Fields: unique_key, agent, service/key, request http, action taken,
-      verdict, timestamp. Secrets NEVER in the ledger.
-- [ ] lease file: ACTIVE grants only. Fields: unique_key, agent, api key,
-      expiry timestamp. Entry DELETED on expiry so the file never grows.
+### STAGE 1 — DATA MODEL + STORE + DECISION GATE  ✅ DONE
+- [x] deny list: ONE blanket list. Agents on it = denied, reason given.
+      Seeded with `robin`. Only Batman (passphrase) edits via `deny`.
+- [x] deny list is TAMPER-EVIDENT: HMAC-signed with the passphrase. Direct
+      edit OR delete -> TAMPER DETECTED, fail-closed (agent DENIED). Robots
+      running as the same user can't forge (no passphrase).
+- [x] request record shape: {http, reason, expiry}. expiry 0 = no lift,
+      1+ = minutes requested.
+- [x] decision gate (`request <agent> <http> <expiry> <reason>`):
+      deny list first -> live lease -> else stage a UNIQUE request key + ask
+      Batman. NO pass-through.
+- [x] lease file: ACTIVE grants only; entry purged the moment it expires
+      (file never grows). Live lease short-circuits -> Batman not asked.
+- [x] ledger: append-only history with a unique request key per pending ask.
+      Secrets NEVER in the ledger.
+- [x] encrypted key store (AES-256) + off-site recovery key.
+- [x] no plaintext in keys/deny/leases/ledger (regression-checked).
 
-### STAGE 2 — THE DECISION LOGIC (the vault's one job)
-- [ ] agent request  -> 1. deny list? on it -> DENY with reason (stop).
-- [ ] 2. lease file? active + unexpired lease for agent+key -> make the
-      call, return result (Batman NOT bothered). time up? purge entry.
-- [ ] 3. no lease -> log to ledger with UNIQUE request key -> ask Batman.
+### STAGE 2 — FINISH THE DECISION LOOP  ⬜ NOT STARTED
 - [ ] timeout: if Batman silent ~1 min -> tell agent "come back no sooner
-      than 5 minutes" + hand the unique key. Agent returns later with it;
-      vault looks it up: YES->call, NO->deny, pending->re-issue key.
-- [ ] verdicts: YES -> create lease (respect requested expiry or grant),
-      make call, return result. NO -> deny, reason "Batman said no".
-      OTHER -> deny, BUT pass Batman's message verbatim to the agent.
-- [ ] lease expiry reached -> purge entry -> next request asks Batman fresh.
+      than 5 minutes" + hand the unique key.
+- [ ] client pickup: agent returns later with the unique key; vault looks it up:
+      YES->call, NO->deny, OTHER->deny+verbatim message, pending->re-issue key.
+- [ ] verdicts: YES -> create lease (respect requested expiry or grant), make
+      call, return result. NO/other -> deny.
+- [ ] regression.sh: add tests for timeout + unique-key pickup + verdicts.
 
-### STAGE 3 — THE CALL (agnostic)
-- [ ] agent hands the full request string with [key_name] placeholders.
-- [ ] vault decrypts the named secret(s), swaps each into the string,
-      sends as-is, returns the HTTP response. Does NOT parse the result.
-- [ ] vault is lazy about the outcome: a bad response is the agent's
-      problem to fix and retry. Vault only returns what the endpoint said.
-- [ ] key values exist only in that one call's memory; never logged,
-      never returned, never written to any file.
+### STAGE 3 — THE CALL (agnostic substitute + send)
+- [ ] agent hands the full request string with [key_name] placeholders; vault
+      decrypts the named secret(s), swaps each in, sends as-is, returns the
+      raw HTTP response. Does NOT parse the result.
+- [ ] retire the old Bearer-only `call <service> <url>` path once the new one
+      replaces it.
+- [ ] vault lazy about outcome: a bad response is the agent's to fix+retry.
+- [ ] key values exist only in that one call's memory; never logged/returned.
+- [ ] regression.sh: add substitution + send test (dummy key, httpbin).
 
 ### STAGE 4 — ACCESS / API
-- [ ] Agents: read-only API only. Can LIST available keys (names, NOT
-      secrets), view ledger, view lease status. Cannot edit anything,
-      cannot request beyond the {http, reason, expiry} shape.
-- [ ] Batman: login-gated. Can see/update/remove secrets, edit deny list,
-      view full ledger + lease file.
-- [ ] agents CANNOT: edit deny list, set/approve their own lease, approve
-      themselves, read secret values, modify ledger/lease files directly.
+- [ ] Agents: read-only API only. Can LIST key NAMES (never secrets), view
+      ledger, view lease status. Cannot edit anything.
+- [ ] Batman: login-gated. See/update/remove secrets, edit deny list, view
+      full ledger + lease file.
+- [ ] agents CANNOT: edit deny list, set/approve own lease, approve self,
+      read secret values, modify ledger/lease files directly.
+- [ ] regression.sh: add read-only-vs-batman boundary tests.
 
 ### STAGE 5 — TELEGRAM SIGN-OFF (Batman)
-- [ ] ask goes to Batman's Telegram (buttons: YES / NO / other). Never
+- [ ] ask goes to Batman's Telegram (buttons: YES / NO / other). NEVER
       terminal input.
 - [ ] NO = batman_said_no. OTHER = always denied + Batman's typed message
       relayed verbatim to the agent.
 - [ ] silent -> timeout behavior (Stage 2) kicks in.
+- [ ] regression.sh: add a verdict-resolution test (mock YES/NO/other).
 
 ### STAGE 6 — protect on boot
 - [ ] macOS Keychain auto-unlock so no passphrase typing each session.
@@ -77,12 +85,13 @@ Everything below matching THIS design: NOT BUILT YET.
 - [ ] verify end-to-end: log in, see secrets, update, make a real call.
 - [ ] only WHEN satisfied: delete the plaintext secrets from keykeeper/.env.
 
-========================================================
+================================================================
 ## IRON RULES
 - Secrets NEVER: returned by the API, logged, written to ledger/lease,
   or left on an agent's disk. Encrypted at rest; in memory for one call.
 - No pass-through. Every grant needs Batman (unless a live lease covers it).
-- Agents cannot self-approve, self-leasе, self-deny or read secrets.
+- Agents cannot self-approve, self-lease, self-deny or read secrets.
 - No SQL. Simple files: append-only ledger + purge-on-expiry lease list.
 - Vault alone writes. Everything reads through the vault API.
 - Real-key steps need Batman present + explicit go.
+- A stage is done only when `regression.sh` covers it and passes.
