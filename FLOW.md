@@ -1,72 +1,71 @@
 # private-api-vault — API key request flow
 
-How a request for a service key is decided. Every path ends in a ledger
-line — WHO asked, for WHAT, WHEN, and the OUTCOME. A keyis never handed
-to an agent; the vault decrypts internally and makes the call itself.
+The vault's ONE job: DECIDE who gets a key and who doesn't — Batman signs
+off, unless a rule or expiry auto-approves. Everything else (the request's
+shape, the call, fixing a bad response) belongs to the agent. The vault
+just holds the secrets, substitutes them into a string it's handed, sends,
+and reports back. A key value never leaves the vault's process.
 
 ```mermaid
 flowchart TD
-    A[Agent asks for key<br/>service + agent + reason] --> B[vault.py allow]
+    AG[Agent arrives: I have an endpoint<br/>and need N keys I don't hold<br/>hands over the request string<br/>with [key_name] placeholders]
 
-    B --> C{Key exists?}
-    C -- No --> D[HELL-NO<br/>log: no such key]
-    C -- Yes --> E{Agent blocked?<br/>e.g. robin}
-    E -- Yes --> F[HELL-NO<br/>log: blocked agent]
-    E -- No --> H{Already approved?<br/>fresh lease still live<br/>for this service+agent}
+    AG --> V[vault: the DECISION]
+    V --> C{Holds those keys?}
+    C -- No --> D[HELL-NO<br/>log: unknown / not held]
+    C -- Yes --> E{Agent allowed?<br/>e.g. robin blocked}
+    E -- No --> F[HELL-NO<br/>log: agent blocked]
+    E -- Yes --> S{Approve how?}
 
-    H -- No --> G{What does<br/>rules.json say?}
-    H -- Yes, lease live --> R[GRANT lease-reused<br/>log GRANT by=lease]
-    R --> RUN[Run the call]
-
-    G -- never --> J[REFUSE<br/>log: never]
-    G -- routine --> K[AUTO-GRANT<br/>log GRANT by=rules]
-    K --> RUN
-    G -- needs-bats --> I[Ask Batman<br/>Telegram YES / NO buttons]
+    S -- has expiry date, still live --> K[AUTO-GRANT<br/>log GRANT by=rule]
+    S -- routine for this agent --> K1[AUTO-GRANT<br/>log GRANT by=rule]
+    S -- needs-bats --> I[Ask Batman<br/>Telegram YES / NO]
+    S -- expired, or none --> I
 
     I --> N{Batman verdict}
     N -- YES --> L[GRANT + start lease<br/>log GRANT by=batman]
-    L --> RUN
     N -- NO --> P[REJECT<br/>log REJECT]
     N -- other --> Q[log OTHER<br/>reason, no action]
 
-    RUN --> S[Agent built the request<br/>full URL + headers + body,<br/>secrets left as placeholder markers<br/>e.g. Authorization: [fal_key]<br/>or a body field: [some_key]]
-    S --> T{Decrypt and substitute}
-    T -- named placeholders from rules --> U[Vault replaces EACH marker<br/>with its decrypted key value]
-    U --> XS[key values only in memory<br/>for this one call, never shown]
-    XS --> Y[Send request, return result to agent]
+    K --> SUB[Vault: substitute each<br/>placeholder with the held secret]
+    K1 --> SUB
+    L --> SUB
+
+    SUB --> SEND[Send the request as-is]
+    SEND --> RES[Result or error<br/>-> returned to the AGENT]
+    RES --> R{Worked?}
+    R -- Yes --> DONE[Return result to agent<br/>log CALL]
+    R -- No: malformed / bad response --> FIX[Agent fixes the request<br/>and retries]
+    FIX --> SUB
+
+    R -- No: agent concludes<br/>it is not working /<br/>token invalid --> PLAN[Agent plans the fix<br/>and asks Batman is it worth<br/>continuing]
+    PLAN --> I
 
     D --> Z[ledger.jsonl]
     F --> Z
-    J --> Z
     P --> Z
     Q --> Z
-    Y --> Z
+    DONE --> Z
 ```
 
-## How the call stays provider-agnostic
+## The division of labour (read this — it IS the design)
 
-The vault does NOT hardcode header shapes (fal/DO/Bearer). Whoever runs the
-call hands the vault a fully-built request — URL, headers, body — with each
-secret left as a `[key_name]` placeholder. The rules for that service name
-the keys each placeholder maps to (one, or several). The vault:
+- **The vault decides only one thing: does this agent get this key?**
+  Rules + your sign-off + expiry windows. That decision path is all the
+  vault's code cares about.
+- **The vault does NOT understand templates or endpoints.** It never learns
+  "fal needs a Key header" or any provider's auth shape. It is handed a
+  finished request string containing `[key_name]` markers, swaps in the
+  secrets it holds, sends it, returns whatever comes back.
+- **If a call comes back badly formed -> the AGENT fixes and retries.** The
+  vault doesn't debug the request; it just tries/refuses the substitution
+  and hands the result back.
+- **If the agent concludes the thing is genuinely not working (endpoint
+  dead, token invalid, money burning) -> the agent plans and asks Batman,
+  not the vault.** That's a "is it worth continuing?" decision, so it
+  routes to the same approval path — you.
+- **One endpoint may need several secrets.** The vault holds however many
+  keys a service needs and replaces every marker it finds. "Three or one"
+  is automatic — it just swaps every placeholder.
 
-1. decrypts each named key,
-2. string-replaces every placeholder with its value,
-3. sends the request, returns the result.
-
-The key values live only in that one call's memory. Adding a new provider
-is just a new request template + a rules entry — no vault code change.
-
-## Legend
-
-- **routine**    — low-stakes, same agent always gets it → auto-grant (still logged)
-- **needs-bats** — anything costing money or risky → Batman must tap YES
-- **never**      — rules release it under no circumstances
-- **lease**      — an approval is valid for N minutes; while it's live we do NOT
-                  re-ask Batman (reused and logged as lease-reused). Only an
-                  expired lease triggers a fresh ask.
-
-Rule of thumb: Batman is only ever asked when a key is genuinely needed,
-not already approved, and rules mark it needs-bats. Fast paths (routine,
-live lease) never bother him. Every node → the ledger; nothing happens
-unlogged.
+Every decision -> the ledger. Nothing unlogged.
