@@ -17,6 +17,7 @@ bad()  { printf 'FAIL: %s\n' "$1"; FAIL=1; }
 # ---------- 1. init ----------
 step "init"
 REC=$(VAULT_PASS=$PASS python3 vault.py init | grep -A1 'RECOVERY KEY' | tail -1 | tr -d '[:space:]')
+export VAULT_REC=$REC
 [ -n "$REC" ] && ok "init minted recovery key" || bad "init failed"
 
 # ---------- 2. deny list seeded signed ----------
@@ -149,6 +150,42 @@ echo "$OUT" | grep -q 'Bearer dummy_fal_key_ABC123' && ok "secret substituted in
 pkill -f "stub_endpoint.py $PORT" 2>/dev/null
 # secret must NOT be visible outside the call (still encrypted at rest)
 if grep -q 'ABC123' .vault/keys.json; then bad "key leaked after call"; else ok "key still encrypted after call"; fi
+
+# ---------- 17. update password: old dead, new live, recovery intact ----------
+step "update password (re-key)"
+python3 - <<'PY'
+import json,base64,subprocess,os
+def aes_crypt(k,iv,d,decrypt=False):
+    p=subprocess.run(['openssl','enc','-aes-256-cbc','-d' if decrypt else '-e','-K',k,'-iv',iv,'-nosalt'],input=d,capture_output=True);return p.stdout
+e=json.load(open('.vault/keys.json'))['fal']
+dk=aes_crypt(os.environ['VAULT_REC'],e['iv3'],base64.b64decode(e['dk_rec']),decrypt=True).hex()
+ct=aes_crypt(dk,e['iv1'],base64.b64decode(e['ct']),decrypt=True)
+open('/tmp/rec_before.txt','w').write(ct.decode())
+PY
+U=$(VAULT_PASS=$PASS VAULT_NEW_PASS=passV2 python3 vault.py update)
+echo "$U" | grep -qi "updated" && ok "update reported success" || bad "update failed"
+# old pass must now FAIL on a pass-requiring command
+OLD=$(VAULT_PASS=$PASS python3 vault.py deny list 2>&1)
+echo "$OLD" | grep -qi "TAMPER\|rejected" && ok "old passphrase rejected after update" || bad "old passphrase still accepted"
+# new pass must work
+NEW=$(VAULT_PASS=passV2 python3 vault.py deny list 2>&1)
+echo "$NEW" | grep -q robin && ok "new passphrase works / deny re-signed" || bad "new passphrase failed"
+# ct + recovery escrow UNCHANGED => recovery key must still decrypt to same value
+BEFORE=$(cat /tmp/rec_before.txt)
+python3 - <<'PY'
+import json,base64,subprocess,os
+def aes_crypt(k,iv,d,decrypt=False):
+    p=subprocess.run(['openssl','enc','-aes-256-cbc','-d' if decrypt else '-e','-K',k,'-iv',iv,'-nosalt'],input=d,capture_output=True);return p.stdout
+e=json.load(open('.vault/keys.json'))['fal']
+dk=aes_crypt(os.environ['VAULT_REC'],e['iv3'],base64.b64decode(e['dk_rec']),decrypt=True).hex()
+ct=aes_crypt(dk,e['iv1'],base64.b64decode(e['ct']),decrypt=True)
+open('/tmp/rec_after.txt','w').write(ct.decode())
+PY
+AFTER=$(cat /tmp/rec_after.txt)
+if [ -z "$BEFORE" ] || [ -z "$AFTER" ]; then bad "recovery decrypt produced empty value"
+elif [ "$BEFORE" = "$AFTER" ]; then ok "recovery key still decrypts same value after re-key"
+else bad "recovery escrow broken by update"; fi
+PASS=passV2
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi

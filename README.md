@@ -23,6 +23,7 @@ python3 vault.py call <method> <url> [--header "Name:[key_name]"] [--data <json>
 python3 vault.py lease                             active leases (passphrase)
 python3 vault.py ledger                            audit history (read-only)
 python3 vault.py recover                           set new passphrase via off-site recovery key
+python3 vault.py update                           change the passphrase (needs current pass; recovery key survives)
 python3 vault.py status                            state overview
 ```
 

@@ -135,6 +135,29 @@ def add_key(service, value, passphrase, rec_key, keep_rec=None):
     }
     save_store(store)
 
+def rekey_passphrase(service, old_pass, new_pass):
+    """Change ONLY the passphrase layer of a key. Keeps the data key, the
+    ciphertext, iv1, and the recovery escrow IDENTICAL (so the recovery key
+    still works after a passphrase change). Refreshes salt + passphrase
+    KDF-derived key + iv2 that wrap the data key."""
+    e = load_store()[service]
+    # recover the data key via the OLD passphrase
+    salt_old = base64.b64decode(e["salt"])
+    pk_old = derive_key(old_pass, salt_old)
+    dk = aes_crypt(pk_old, e["iv2"], base64.b64decode(e["dk_pass"]), decrypt=True).hex()
+    # re-wrap the SAME data key under the NEW passphrase
+    salt_new = os.urandom(16)
+    pk_new = derive_key(new_pass, salt_new)
+    iv2_new = os.urandom(16).hex()
+    dk_pass_new = aes_crypt(pk_new, iv2_new, bytes.fromhex(dk))
+    e["salt"] = base64.b64encode(salt_new).decode()
+    e["dk_pass"] = base64.b64encode(dk_pass_new).decode()
+    e["iv2"] = iv2_new
+    e["note"] = (e.get("note", "") + " rekeyed " + now_iso()).strip()
+    store = load_store()
+    store[service] = e
+    save_store(store)
+
 def unwrap(service, passphrase):
     e = load_store()[service]
     salt = base64.b64decode(e["salt"])
@@ -535,6 +558,50 @@ def cmd_recover():
     print("Recovered. Keys + signed files re-encrypted/re-signed under new passphrase.")
     return 0
 
+def cmd_update(passphrase):
+    # update-password: change the vault passphrase (needs the CURRENT one).
+    # Re-encrypts each key's passphrase layer under the new passphrase, keeps
+    # the recovery escrow intact, re-signs deny/lease/pending files.
+    if not os.path.exists(KF):
+        print("No store. Run `init` first."); return 1
+    # 1) verify the current passphrase by decrypting one real key
+    store = load_store()
+    if not store:
+        print("Store has no keys yet - cannot validate current passphrase. Add a key first.")
+        return 1
+    try:
+        first = next(iter(store))
+        unwrap(first, passphrase)
+    except Exception:
+        print("Current passphrase rejected. It must match the one the keys were stored under.")
+        return 1
+    # 2) capture the live signed-file state under the OLD passphrase
+    agents, dst = load_deny(passphrase)
+    if dst != "ok":
+        print("TAMPER DETECTED: deny list invalid. Cannot update (fail-closed)."); return 4
+    leases, lst = purge_expired(passphrase)
+    pending, pst = load_pending(passphrase)
+    if lst != "ok" or pst != "ok":
+        print("TAMPER DETECTED: lease or pending file invalid. Cannot update (fail-closed)."); return 4
+    # 3) new passphrase: use a DIFFERENT prompt/env key than the current one
+    p1 = ask("VAULT_NEW_PASS", "New passphrase: "); p2 = ask("VAULT_NEW_PASS", "Repeat: ")
+    if p1 != p2: print("Mismatch."); return 1
+    if p1 == passphrase:
+        print("New passphrase is identical to current - no change made.")
+        return 1
+    # 4) re-wrap every key's passphrase layer ONLY (data key, ct, iv1 and
+    #    recovery escrow stay identical, so the recovery key still works)
+    for s in list(store.keys()):
+        rekey_passphrase(s, passphrase, p1)
+    # 5) re-sign the tamper-evident files under the new passphrase
+    save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
+    save_leases(leases, p1)
+    save_pending(pending, p1)
+    log_event({"ev":"UPDATE_PASS","by":"batman","keys":len(store)})
+    print(f"Passphrase updated. {len(store)} key(s) re-encrypted; deny/lease/pending re-signed.")
+    print("The OLD passphrase no longer works; the recovery key still does.")
+    return 0
+
 def cmd_status(passphrase):
     st = load_store()
     agents, dst = load_deny(passphrase)
@@ -579,6 +646,7 @@ def main():
         "lease": lambda: cmd_lease(passphrase),
         "call": lambda: cmd_call(args, passphrase),
         "recover": lambda: cmd_recover(),
+        "update": lambda: cmd_update(passphrase),
         "status": lambda: cmd_status(passphrase),
         "ledger": lambda: cmd_ledger(),
     }

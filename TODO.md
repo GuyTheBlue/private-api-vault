@@ -55,6 +55,10 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
       approved; yes -> create lease + call; no -> deny; other -> deny +
       Batman's message verbatim to the agent.
 - [x] regression.sh 11-15 cover stage/pending/decide/resolve for all verdicts.
+- [x] account: `update` changes the passphrase (old dead, new live) while the
+      recovery key keeps working — add_key was re-keying BADLY (minted a new
+      data key, orphaning the recovery escrow); fixed with `rekey_passphrase`
+      that re-wraps ONLY the passphrase layer. Covered by regression 17.
 
 ### STAGE 3 — THE CALL (agnostic substitute + send)  ✅ DONE
 - [x] vault `call <method> <url> [--header 'Name:[key_name]'] [--data <json>]`:
