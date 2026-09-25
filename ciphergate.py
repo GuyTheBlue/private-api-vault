@@ -727,9 +727,21 @@ def cmd_ledger():
     return 0
 
 def _banner():
-    """CipherGate terminal intro art — posterized 2-tone render of the logo:
-    black background -> space, keyhole (teal/cyan) -> blocks, so the silhouette
-    reads clean. Regenerate from logo.jpg via emit_banner_top.py."""
+    """CipherGate intro: render the REAL logo (logo.jpg -> art_ansi.txt) as
+    truecolor half-block terminal art, 2 px/cell. Falls back to a compact
+    ASCII keyhole when the art file is absent or the terminal has no color."""
+    art = os.path.join(os.path.dirname(os.path.abspath(__file__)), "art_ansi.txt")
+    if os.path.exists(art) and os.environ.get("TERM") and "color" in os.environ.get("COLORTERM", "").lower():
+        try:
+            with open(art, encoding="utf-8") as f:
+                for line in f:
+                    sys.stdout.write(line.rstrip("\n") + "\n")
+            sys.stdout.write("\n")
+            print("   CipherGate — Secure API Routing\n")
+            print("   API keys held encrypted; every call waits on the gate.\n")
+            return
+        except Exception:
+            pass  # fall through to ASCII
     logo = r"""
                                     ::                                               ::
                                     :                                                 :
