@@ -29,15 +29,11 @@ flowchart TD
     N -- NO --> P[REJECT<br/>log REJECT]
     N -- other --> Q[log OTHER<br/>reason, no action]
 
-    RUN --> T{Call's auth profile}
-    T -- fal --> U[Key-header: Authorization: Key ...]
-    T -- DigitalOcean --> V[token-header]
-    T -- vast / rest --> W[Authorization: Bearer ...]
-
-    U --> XS[key used only inside the call, never shown]
-    V --> XS
-    W --> XS
-    XS --> Y[Return result to agent]
+    RUN --> S[Agent built the request<br/>full URL + headers + body,<br/>secrets left as placeholder markers<br/>e.g. Authorization: [fal_key]<br/>or a body field: [some_key]]
+    S --> T{Decrypt and substitute}
+    T -- named placeholders from rules --> U[Vault replaces EACH marker<br/>with its decrypted key value]
+    U --> XS[key values only in memory<br/>for this one call, never shown]
+    XS --> Y[Send request, return result to agent]
 
     D --> Z[ledger.jsonl]
     F --> Z
@@ -46,6 +42,20 @@ flowchart TD
     Q --> Z
     Y --> Z
 ```
+
+## How the call stays provider-agnostic
+
+The vault does NOT hardcode header shapes (fal/DO/Bearer). Whoever runs the
+call hands the vault a fully-built request — URL, headers, body — with each
+secret left as a `[key_name]` placeholder. The rules for that service name
+the keys each placeholder maps to (one, or several). The vault:
+
+1. decrypts each named key,
+2. string-replaces every placeholder with its value,
+3. sends the request, returns the result.
+
+The key values live only in that one call's memory. Adding a new provider
+is just a new request template + a rules entry — no vault code change.
 
 ## Legend
 
