@@ -1,32 +1,42 @@
 # private-api-vault — API key request flow
 
-The agent does not hold API keys (keys live only in the vault's encrypted
-store). Every session that needs a key asks the vault. The vault decides
-yes or no, and on a yes makes the call itself and returns the HTTP
-response. A key value never leaves the vault.
+The agent has no key. It asks the vault. The vault runs the logic below
+and answers ONE of two things: "fuck off" (with the reason) or "here is
+the HTTP result". A key value never leaves the vault.
 
 ```mermaid
 flowchart TD
-    A["Agent: a key is needed for this session (held in the skill, not here)"]
-    A --> B["Agent asks the vault for key"]
-
-    B --> C["vault decides YES or NO"]
-    C --> D{"Approval reached"}
-    D -- "no (no key, blocked agent, or not approved)" --> E["vault says NO"]
-    D -- "yes (routine, expiry live, or Batman signs off)" --> F["vault makes the API call"]
-    F --> G["vault returns the HTTP response to the agent"]
-    E --> H["ledger: logged"]
-    G --> H["ledger: logged"]
+    A["Agent asks the vault for a key"]
+    A --> S["vault sees WHO asked"]
+    S --> R{"rule for this agent + request?"}
+    R -- "no" --> FO["Not in my city. (say the reason)"]
+    R -- "yes" --> E{"is the approval expired?"}
+    E -- "not expired" --> MC["make the call"]
+    E -- "expired" --> ASK["ask Batman for permission"]
+    ASK --> B{"Batman's answer"}
+    B -- "no" --> FO2["Denied. Back to the Batcave."]
+    B -- "yes" --> MC
+    MC --> RES["return the HTTP result to the agent"]
+    FO --> L["ledger: log it"]
+    FO2 --> L
+    RES --> L
+    MC -. "if a longer expiry was requested and approved, log the new expiry date; else the approval dies at session end" .-> L
 ```
 
-## What the vault does
+## The vault's logic, in order
 
-- Decides YES or NO on every key request.
-- YES comes from a rule (routine / expiry still live) or from Batman's
-  sign-off.
-- On YES it doesn't hand a key out — it runs the call itself and returns
-  the HTTP response.
-- On NO it says so, and the agent is refused.
-- Every decision is written to the ledger.
+1. Who asked? Apply the rule for that agent + request.
+   - NO → "Not in my city." — with the reason.
+2. YES → is the approval expired?
+   - Not expired → make the call.
+   - Expired → go get Batman's permission.
+3. Batman's answer:
+   - NO → "Denied. Back to the Batcave."
+   - YES → make the call. If a longer expiry was requested AND approved, log
+     the new expiry date; otherwise the approval is only good until the
+     session ends (dies by default).
 
-That's the whole map. The agent asks, the vault answers, the ledger records.
+The vault answers the requesting agent with either a refusal (with reason)
+or the HTTP result. Every decision is logged.
+
+That's the whole logic.
