@@ -4,50 +4,60 @@ vault.py - the Gsquared Productions API-key Vault (terminal).
 
 WHAT IT IS
   A single terminal program that HOLDS the API keys ENCRYPTED, keeps a
-  TAMPER-EVIDENT deny list and lease file, keeps a LEDGER of history, and
-  when allowed decrypts a key INTERNALLY and makes the https call itself,
-  returning only the RESULT. A key is never handed to an agent, never
-  written mid-session, never shown, never returned by the API.
+  TAMPER-EVIDENT deny list, lease file and pending-request index, keeps a
+  LEDGER of history, and when allowed decrypts a key INTERNALLY and makes
+  the https call itself, returning only the RESULT. A key is never handed
+  to an agent, never written mid-session, never shown, never returned.
 
 THE DECISION (the vault's one job)
   A request decides like this:
     1. deny list FIRST: agent on it -> DENIED with the reason, done.
     2. active unexpired lease for agent+key -> make the call (Batman
        NOT bothered). Entry purged on expiry.
-    3. otherwise -> log to the ledger with a UNIQUE request key, ask
-       Batman. YES -> grant+lease and call; NO/other -> deny.
+    3. otherwise -> write a PENDING entry with a UNIQUE request key, log
+       it, and ask Batman. When the agent returns with the key, the vault
+       resolves it: pending -> come back later; YES -> lease + call; NO
+       or other -> deny (other passes Batman's message verbatim).
   There is NO pass-through / "go as usual".
 
-TAMPER-EVIDENCE (why agents can't edit the deny list / leases)
-  deny.json and leases.json carry an HMAC whose key is derived from the
-  vault PASSphrase. Agents do not hold the passphrase, so they cannot
-  re-sign a file they edit. A direct edit or delete leaves a bad / missing
-  signature -> the vault FAILS CLOSED (logs a TAMPER alarm, treats the
-  agent as DENIED) rather than silently resetting. Only the passphrase
-  holder (Batman) can write a valid deny list or lease file.
+STAGE-2 TELEGRAM STUB (for now)
+  Real Telegram buttons come in Stage 5. Today `decide <key> yes|no|other
+  [msg]` stands in for Batman's answer so the index/lookup logic can be
+  tested instantly instead of waiting on live Telegram. The wait window is
+  variable via env VAULT_WAIT_MIN (default 5) so short timeouts are easy.
+
+TAMPER-EVIDENCE (why agents can't edit the deny list / leases / pending)
+  deny.json, leases.json and pending.json carry an HMAC keyed to the vault
+  PASSphrase. Agents do not hold the passphrase, so they cannot re-sign a
+  file they edit. A direct edit or delete leaves a bad / missing signature
+  -> the vault FAILS CLOSED (logs a TAMPER alarm, treats the agent as
+  DENIED) rather than silently resetting.
 
   LIMITATION (honest): agents run as the same OS user, so they can OPEN
   the files but cannot forge a valid signature without the vault
-  passphrase. True process isolation - the vault as its own service that
-  agents call over an API, holding the unlocked key in memory - is Stage 4.
-  Until then the passphrase gate is the wall.
+  passphrase. True process isolation - the vault as its own service - is
+  Stage 4. Until then the passphrase gate is the wall.
 
 USAGE (all terminal)
   python3 vault.py init                            first run: set passphrase, mint recovery key
   python3 vault.py add    <service>                add/update an encrypted key
   python3 vault.py list                             names only, never values
   python3 vault.py deny    list|add|remove        manage the deny list (passphrase)
-  python3 vault.py request <agent> <http> <expiry_min> <reason>   decide a request (passphrase)
+  python3 vault.py request <agent> <http> <expiry_min> <reason>   stage a decision
+  python3 vault.py pending                         show pending requests (passphrase)
+  python3 vault.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
+  python3 vault.py resolve <req_key>              agent returns: pick up the verdict
   python3 vault.py lease                           active leases (passphrase)
-  python3 vault.py ledger                          audit history (read-only, no passphrase)
+  python3 vault.py ledger                          audit history (read-only)
   python3 vault.py recover                         new passphrase via off-site recovery key
   python3 vault.py status                          where things live + counts
 
 DIRECTORY (all under lock on this machine, gitignored)
   .vault/keys.json       the encrypted key store
-  .vault/deny.json       blanket deny list - signed with passphrase-derived HMAC
+  .vault/deny.json       blanket deny list - signed, passphrase-keyed
   .vault/leases.json     ACTIVE grants only, signed, purged on expiry
-  .vault/ledger.jsonl    append-only history; entries carry a unique request key
+  .vault/pending.json    staged requests by unique key, signed
+  .vault/ledger.jsonl    append-only history
   vault_recovery.key     NOT stored here - printed once at init, kept OFF-SITE.
 """
 import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time
@@ -57,10 +67,13 @@ VT   = os.path.join(BASE, ".vault")
 KF   = os.path.join(VT, "keys.json")
 DF   = os.path.join(VT, "deny.json")
 LF_  = os.path.join(VT, "leases.json")
+PF   = os.path.join(VT, "pending.json")
 LG   = os.path.join(VT, "ledger.jsonl")
 
-_DENY_TAG  = "gsq-vault-deny-v1"
-_LEASE_TAG = "gsq-vault-lease-v1"
+_DENY_TAG   = "gsq-vault-deny-v1"
+_LEASE_TAG  = "gsq-vault-lease-v1"
+_PENDING_TAG = "gsq-vault-pending-v1"
+WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -155,41 +168,38 @@ def _check_bundle(raw, key):
     mine = _hmac.new(key, _canon(data), _hl.sha256).hexdigest()
     return data if _hmac.compare_digest(mine, sig) else None
 
-# ---------- deny list (one blanket list; tamper-evident, fail-closed) ----------
-def load_deny(passphrase):
-    if not os.path.exists(DF):
-        return {}, "missing"
+# ---------- signed JSON helpers ----------
+def _signed_load(path, passphrase, tag, default):
+    """Load (data, status). status 'ok'|'missing'|'tampered'."""
+    if not os.path.exists(path):
+        return default, "missing"
     try:
-        raw = json.load(open(DF))
+        raw = json.load(open(path))
     except Exception:
-        return {}, "tampered"
-    data = _check_bundle(raw, sign_key(passphrase, _DENY_TAG))
+        return default, "tampered"
+    data = _check_bundle(raw, sign_key(passphrase, tag))
     if data is None:
-        return {}, "tampered"
-    return data.get("agents", {}), "ok"
-
-def save_deny(agents, passphrase):
-    raw = _bundle({"agents": agents}, sign_key(passphrase, _DENY_TAG))
-    json.dump(raw, open(DF, "w"), indent=2)
-    os.chmod(DF, 0o600)
-
-# ---------- lease file (ACTIVE grants only; tamper-evident, purged on expiry) ----------
-def load_leases(passphrase):
-    if not os.path.exists(LF_):
-        return [], "missing"
-    try:
-        raw = json.load(open(LF_))
-    except Exception:
-        return [], "tampered"
-    data = _check_bundle(raw, sign_key(passphrase, _LEASE_TAG))
-    if data is None:
-        return [], "tampered"
+        return default, "tampered"
     return data, "ok"
 
+def _signed_save(path, data, passphrase, tag):
+    json.dump(_bundle(data, sign_key(passphrase, tag)), open(path, "w"), indent=2)
+    os.chmod(path, 0o600)
+
+# ---------- deny list (one blanket list; tamper-evident, fail-closed) ----------
+def load_deny(passphrase):
+    data, st = _signed_load(DF, passphrase, _DENY_TAG, {})
+    return data.get("agents", {}), st
+
+def save_deny(agents, passphrase):
+    _signed_save(DF, {"agents": agents}, passphrase, _DENY_TAG)
+
+# ---------- lease file (ACTIVE grants only; tamper-evident, purged) ----------
+def load_leases(passphrase):
+    return _signed_load(LF_, passphrase, _LEASE_TAG, [])
+
 def save_leases(leases, passphrase):
-    raw = _bundle(leases, sign_key(passphrase, _LEASE_TAG))
-    json.dump(raw, open(LF_, "w"), indent=2)
-    os.chmod(LF_, 0o600)
+    _signed_save(LF_, leases, passphrase, _LEASE_TAG)
 
 def purge_expired(passphrase):
     now = now_epoch()
@@ -209,6 +219,14 @@ def active_lease(agent, key, passphrase):
         if l.get("agent") == agent and (key == "*" or l.get("key") == key):
             return l
     return None
+
+# ---------- pending index (staged by unique request key) ----------
+def load_pending(passphrase):
+    data, st = _signed_load(PF, passphrase, _PENDING_TAG, {})
+    return data, st   # dict keyed by req_key
+
+def save_pending(pending, passphrase):
+    _signed_save(PF, pending, passphrase, _PENDING_TAG)
 
 # ---------- CLI ----------
 def ask(env, prompt):
@@ -230,6 +248,7 @@ def cmd_init():
     save_store({})
     save_deny({"robin": "the overreacher (coordinator)"}, p1)
     save_leases([], p1)
+    save_pending({}, p1)
     log_event({"ev":"INIT","by":"batman","recovery_minted":True})
     print("\n" + "="*60)
     print("STORE THIS RECOVERY KEY OFF-SITE - shown ONCE, never again, not saved here:")
@@ -269,8 +288,7 @@ def cmd_deny(argv, passphrase):
     agents, st = load_deny(passphrase)
     if st != "ok":
         log_event({"ev":"TAMPER","file":"deny","outcome":"FAIL_CLOSED"})
-        print("TAMPER DETECTED: deny list signature invalid or missing.")
-        print("Fail-closed: agents are DENIED until Batman rebuilds the list with the correct passphrase.")
+        print("TAMPER DETECTED: deny list signature invalid or missing. Fail-closed: agents DENIED.")
         return 4
     if sub == "list":
         if not agents: print("(deny list empty)")
@@ -311,7 +329,6 @@ def cmd_request(argv, passphrase):
         log_event({"ev":"TAMPER","file":"deny","agent":agent,"outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: deny list unverifiable. Fail-closed: DENIED.")
         return 4
-
     if agent in agents:
         log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"DENY","by":"list","why":agents[agent]})
         print(f"DENIED: {agent} is on the deny list - {agents[agent]}. 'Not in my city.'")
@@ -323,12 +340,114 @@ def cmd_request(argv, passphrase):
         print(f"ACTIVE LEASE covers {agent} (expires {lease['expires_iso']}). Making the call (Batman not asked).")
         return 0
 
+    # No lease -> stage a PENDING entry with a UNIQUE key, ask Batman.
     req_key = secrets.token_hex(8)
+    pending, st = load_pending(passphrase)
+    if st != "ok":
+        log_event({"ev":"TAMPER","file":"pending","agent":agent,"outcome":"FAIL_CLOSED"})
+        print("TAMPER DETECTED: pending index unverifiable. Fail-closed: DENIED.")
+        return 4
+    pending[req_key] = {
+        "agent": agent, "http": http, "reason": reason, "expiry_min": expiry,
+        "asked_at": now_iso(), "asked_epoch": now_epoch(), "status": "pending",
+        "msg": "", "lease_created": False,
+    }
+    save_pending(pending, passphrase)
     log_event({"ev":"PENDING","agent":agent,"http":http,"reason":reason,
                "expiry_min":expiry,"req_key":req_key,"outcome":"ASK_BATMAN"})
-    print(f"NO lease for {agent}. Staged with request key {req_key}; handed to Batman to approve ({expiry} min lift requested).")
-    print("(Stage 5 delivers this to Batman's Telegram; his verdict resolves this request key.)")
+    print(f"{agent}: no lease. Staged with request key {req_key}; handed to Batman to approve.")
+    print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
     return 0
+
+def cmd_pending(passphrase):
+    pending, st = load_pending(passphrase)
+    if st != "ok":
+        print("TAMPER DETECTED: pending index unverifiable.")
+        return 4
+    if not pending: print("(no pending requests)"); return 0
+    now = now_epoch()
+    for k, e in sorted(pending.items()):
+        age = max(0, int((now - e["asked_epoch"]) // 60))
+        w = "PENDING" if e["status"] == "pending" else e["status"].upper()
+        print(f"{k}  {e['agent']}  {e['http']}  {w}  asked {age}m ago  {e.get('msg','')}")
+    return 0
+
+def cmd_decide(argv, passphrase):
+    # decide <req_key> <yes|no|other> [msg]   — TELEGRAM STUB
+    if len(argv) < 2:
+        print("usage: vault.py decide <req_key> <yes|no|other> [msg]"); return 1
+    req_key, verdict = argv[0], argv[1].lower()
+    msg = " ".join(argv[2:])
+    if verdict not in ("yes", "no", "other"):
+        print("verdict must be yes|no|other"); return 1
+    pending, st = load_pending(passphrase)
+    if st != "ok":
+        print("TAMPER DETECTED: pending index unverifiable.")
+        return 4
+    if req_key not in pending:
+        print(f"No pending entry for {req_key}."); return 1
+    e = pending[req_key]
+    e["status"] = verdict
+    e["msg"] = msg
+    e["answered_at"] = now_iso()
+    save_pending(pending, passphrase)
+    log_event({"ev":"VERDICT","req_key":req_key,"agent":e["agent"],"verdict":verdict,"by":"batman-stub","msg":msg})
+    print(f"{req_key}: {e['agent']} -> {verdict.upper()}" + (f" (msg: {msg})" if msg else ""))
+    return 0
+
+def cmd_resolve(argv, passphrase):
+    # resolve <req_key>  — agent returns and picks up the verdict
+    if len(argv) < 1: print("usage: vault.py resolve <req_key>"); return 1
+    req_key = argv[0]
+    pending, st = load_pending(passphrase)
+    if st != "ok":
+        log_event({"ev":"TAMPER","file":"pending","outcome":"FAIL_CLOSED"})
+        print("TAMPER DETECTED: pending index unverifiable. Fail-closed: DENIED.")
+        return 4
+    if req_key not in pending:
+        log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"UNKNOWN_KEY"})
+        print(f"No pending entry for {req_key}. The request may have been superseded.")
+        return 1
+    e = pending[req_key]
+    # variable-wait timeout: if still pending and past the window, tell agent to wait.
+    if e["status"] == "pending":
+        age_min = (now_epoch() - e["asked_epoch"]) / 60
+        if age_min < WAIT_MIN:
+            still = e["asked_epoch"] + WAIT_MIN * 60 - now_epoch()
+            print(f"Still waiting on Batman. Come back in ~{int(still//60)}m (or {WAIT_MIN}min window); key {req_key} is yours.")
+            log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"STILL_PENDING","agent":e["agent"]})
+            return 0
+        # past window but no verdict -> re-ask / tell agent to try again later
+        log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"PENDING_TIMEOUT","agent":e["agent"]})
+        print(f"Batman hasn't answered in {WAIT_MIN} min. Not approved. Come back later with key {req_key}.")
+        return 0
+
+    # verdict decided
+    e2 = pending.pop(req_key) if e["status"] in ("yes", "no", "other") else e
+    if e2["status"] == "yes":
+        # create a lease for the granted window, then make the call (Stage 3 swaps real keys)
+        leases, lst = load_leases(passphrase)
+        if lst != "ok":
+            print("TAMPER DETECTED: lease file unverifiable.")
+            return 4
+        dur = e2.get("expiry_min", 0) or 5
+        lease = {"agent": e2["agent"], "key": "*", "http": e2["http"],
+                 "expires_at": now_epoch() + dur * 60,
+                 "expires_iso": (datetime.datetime.now(datetime.timezone.utc) +
+                                 datetime.timedelta(minutes=dur)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        leases.append(lease)
+        save_leases(leases, passphrase)
+        log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman","lease_min":dur})
+        print(f"Approved [{req_key}] {e2['agent']}. Lease {dur} min ({e2['http']}). Key used internally for the call.")
+        return 0
+    if e2["status"] == "no":
+        log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
+        print(f"Denied [{req_key}] {e2['agent']}. 'Denied. Back to the Batcave.'")
+        return 3
+    # other: always denied, but pass Batman's message verbatim
+    log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman","why":"other","msg":e2["msg"]})
+    print(f"Denied [{req_key}] {e2['agent']}. Batman says: \"{e2['msg']}\"")
+    return 3
 
 def cmd_lease(passphrase):
     active, st = purge_expired(passphrase)
@@ -337,7 +456,7 @@ def cmd_lease(passphrase):
         return 4
     if not active: print("(no active leases)")
     for l in active:
-        print(f"{l['agent']}  key={l.get('key')}  expires {l.get('expires_iso')}")
+        print(f"{l['agent']}  key={l.get('key')}  http={l.get('http','')}  expires {l.get('expires_iso')}")
     return 0
 
 def cmd_call(argv, passphrase):
@@ -371,6 +490,7 @@ def cmd_recover():
     agents, _ = load_deny(rk)
     save_deny(agents or {"robin": "the overreacher (coordinator)"}, p1)
     save_leases([], p1)
+    save_pending({}, p1)
     log_event({"ev":"RECOVER","by":"batman"})
     print("Recovered. Keys + signed files re-encrypted/re-signed under new passphrase.")
     return 0
@@ -379,10 +499,12 @@ def cmd_status(passphrase):
     st = load_store()
     agents, dst = load_deny(passphrase)
     leases, lst = purge_expired(passphrase)
+    pending, pst = load_pending(passphrase)
     print(f"vault dir     : {VT}")
     print(f"services      : {len(st)}")
     print(f"deny list     : {', '.join(agents.keys()) or '(none)'}  [{dst}]")
     print(f"active leases : {len(leases)}  [{lst}]")
+    print(f"pending asks  : {len(pending)}  [{pst}]")
     print(f"ledger lines  : {sum(1 for _ in open(LG)) if os.path.exists(LG) else 0}")
     return 0
 
@@ -411,6 +533,9 @@ def main():
         "list": lambda: cmd_list(),
         "deny": lambda: cmd_deny(args, passphrase),
         "request": lambda: cmd_request(args, passphrase),
+        "pending": lambda: cmd_pending(passphrase),
+        "decide": lambda: cmd_decide(args, passphrase),
+        "resolve": lambda: cmd_resolve(args, passphrase),
         "lease": lambda: cmd_lease(passphrase),
         "call": lambda: cmd_call(args, passphrase),
         "recover": lambda: cmd_recover(),

@@ -16,6 +16,9 @@ python3 vault.py add  <service>                    store an encrypted key
 python3 vault.py list                              names only, never values
 python3 vault.py deny list|add|remove              manage the ONE deny list (passphrase)
 python3 vault.py request <agent> <http> <expiry_min> <reason>   run the decision gate
+python3 vault.py pending                           show staged requests (passphrase)
+python3 vault.py decide <req_key> yes|no|other [msg]   TELEGRAM STUB: set Batman's verdict
+python3 vault.py resolve <req_key>                 agent returns and picks up the verdict
 python3 vault.py lease                             active leases (passphrase)
 python3 vault.py ledger                            audit history (read-only)
 python3 vault.py recover                           set new passphrase via off-site recovery key
@@ -23,7 +26,10 @@ python3 vault.py status                            state overview
 ```
 
 The decision gate (`request`) checks the deny list first, then a live
-lease; only a clean request is handed to Batman for a sign-off.
+lease; only a clean request is staged with a unique key and handed to
+Batman. The agent returns with that key (`resolve`) to pick up the verdict.
+While Telegram buttons land in Stage 5, `decide` stands in for Batman's
+answer so the index/lookup logic is testable instantly (no live wait).
 
 ## Security model
 - Keys are ciphertext at rest (`.vault/` is gitignored — never pushed).

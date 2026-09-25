@@ -13,9 +13,10 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
 
 ## STATUS (accurate as of 2026-09-25)
 - STAGE 1 (data model + store + decision gate): DONE, verified by `regression.sh`.
-- STAGES 2–6 + MIGRATION: NOT STARTED.
+- STAGE 2 (decision loop: pending index, variable wait, telegram-stub verdicts, resolve): DONE, verified.
+- STAGES 3-6 + MIGRATION: NOT STARTED.
 - Real keys NOT loaded.
-- Regression suite: `regression.sh` — 11 checks, all passing. EXTEND IT for
+- Regression suite: `regression.sh` - 16 checks, all passing. EXTEND IT for
   every stage below before marking that stage done.
 
 ========================================================
@@ -40,14 +41,19 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
 - [x] encrypted key store (AES-256) + off-site recovery key.
 - [x] no plaintext in keys/deny/leases/ledger (regression-checked).
 
-### STAGE 2 — FINISH THE DECISION LOOP  ⬜ NOT STARTED
-- [ ] timeout: if Batman silent ~1 min -> tell agent "come back no sooner
-      than 5 minutes" + hand the unique key.
-- [ ] client pickup: agent returns later with the unique key; vault looks it up:
-      YES->call, NO->deny, OTHER->deny+verbatim message, pending->re-issue key.
-- [ ] verdicts: YES -> create lease (respect requested expiry or grant), make
-      call, return result. NO/other -> deny.
-- [ ] regression.sh: add tests for timeout + unique-key pickup + verdicts.
+### STAGE 2 — FINISH THE DECISION LOOP  ✅ DONE
+- [x] PENDING index: staged requests keyed by a unique request key, signed
+      like the deny/lease files (tamper-evident, fail-closed on edit/delete).
+- [x] variable wait window (env `VAULT_WAIT_MIN`, default 5 min) so short
+      timeouts make testing instant instead of waiting on a clock.
+- [x] TELEGRAM STUB for now: `decide <req_key> yes|no|other [msg]` stands in
+      for Batman's button answer so index/lookup logic is testable with no
+      live Telegram. Real buttons land in Stage 5.
+- [x] resolve <req_key>: agent returns with the key; vault looks it up.
+      pending+in-window -> come back later; pending+past-window -> not
+      approved; yes -> create lease + call; no -> deny; other -> deny +
+      Batman's message verbatim to the agent.
+- [x] regression.sh 11-15 cover stage/pending/decide/resolve for all verdicts.
 
 ### STAGE 3 — THE CALL (agnostic substitute + send)
 - [ ] agent hands the full request string with [key_name] placeholders; vault

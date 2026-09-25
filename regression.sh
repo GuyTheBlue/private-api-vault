@@ -91,7 +91,49 @@ step "lease short-circuits to call"
 CR=$(VAULT_PASS=$PASS python3 vault.py request link https://api.vast.ai 5 "grab box"; echo "rc=$?")
 echo "$CR" | grep -qi "ACTIVE LEASE" && ok "lease covers link, Batman not asked" || bad "lease not used"
 
-# ---------- 10. crypto smoke (encryption at rest + internal send) ----------
+# ---------- 11. stage request -> pending entry with unique key ----------
+step "stage request"
+export VAULT_WAIT_MIN=0
+K1=$(VAULT_PASS=$PASS python3 vault.py request oracle https://api.fal.ai/render 5 "render pic" \
+     | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+[ -n "$K1" ] && ok "request staged with unique key $K1" || bad "no request key"
+PV=$(VAULT_PASS=$PASS python3 vault.py pending)
+echo "$PV" | grep -q "$K1" && ok "pending shows staged entry" || bad "pending entry missing"
+
+# ---------- 12. decide + resolve: YES -> lease ----------
+step "verdict YES grants lease"
+VAULT_PASS=$PASS python3 vault.py decide "$K1" yes >/dev/null
+R1=$(VAULT_PASS=$PASS python3 vault.py resolve "$K1")
+echo "$R1" | grep -qi "Approved" && ok "YES resolve approves + leases" || bad "YES resolve failed"
+LV=$(VAULT_PASS=$PASS python3 vault.py lease)
+echo "$LV" | grep -q oracle && ok "lease created for oracle" || bad "lease not created"
+
+# ---------- 13. decide OTHER -> resolve denies + verbatim message ----------
+step "verdict OTHER denies + verbatim message"
+K2=$(VAULT_PASS=$PASS python3 vault.py request x_other https://api.vast.ai 10 'grab box' \
+     | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+MSG="message me on Instagram, tell me what's going on"
+VAULT_PASS=$PASS python3 vault.py decide "$K2" other "$MSG" >/dev/null
+R2=$(VAULT_PASS=$PASS python3 vault.py resolve "$K2")
+echo "$R2" | grep -qi "Denied" && echo "$R2" | grep -qF "$MSG" \
+  && ok "OTHER denies + relays Batman's message" || bad "OTHER path wrong"
+
+# ---------- 14. decide NO -> resolve denies ----------
+step "verdict NO denies"
+K3=$(VAULT_PASS=$PASS python3 vault.py request x_no https://api.r2 5 verify \
+     | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+VAULT_PASS=$PASS python3 vault.py decide "$K3" no >/dev/null
+R3=$(VAULT_PASS=$PASS python3 vault.py resolve "$K3")
+echo "$R3" | grep -qi "Denied" && ok "NO resolve denies" || bad "NO resolve wrong"
+
+# ---------- 15. resolve at WAIT_MIN=0 with no verdict -> not approved, come back ----------
+step "pending timeout (window 0)"
+K4=$(VAULT_PASS=$PASS python3 vault.py request x_timeout https://api.x 5 newthing \
+     | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+R4=$(VAULT_PASS=$PASS python3 vault.py resolve "$K4")
+echo "$R4" | grep -qi "come back later" && ok "pending past window tells agent to come back" || bad "pending timeout wrong"
+
+# ---------- 16. crypto smoke (encryption at rest + internal send) ----------
 step "crypto smoke"
 VAULT_PASS=$PASS VAULT_VALUE=dummy_fal_key_ABC123 VAULT_REC=$REC python3 vault.py add fal >/dev/null 2>&1
 if grep -q 'ABC123' .vault/keys.json; then bad "key leaked at rest"; else ok "key encrypted at rest"; fi
