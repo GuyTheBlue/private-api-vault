@@ -13,8 +13,10 @@ flowchart TD
     C -- Yes --> E{Agent blocked?<br/>e.g. robin}
     E -- Yes --> F[HELL-NO<br/>log: blocked agent]
     E -- No --> H{Already approved?<br/>fresh lease still live<br/>for this service+agent}
-    H -- Yes --> RUN[Run the call]
+
     H -- No --> G{What does<br/>rules.json say?}
+    H -- Yes, lease live --> R[GRANT lease-reused<br/>log GRANT by=lease]
+    R --> RUN[Run the call]
 
     G -- never --> J[REFUSE<br/>log: never]
     G -- routine --> K[AUTO-GRANT<br/>log GRANT by=rules]
@@ -23,10 +25,9 @@ flowchart TD
 
     I --> N{Batman verdict}
     N -- YES --> L[GRANT + start lease<br/>log GRANT by=batman]
+    L --> RUN
     N -- NO --> P[REJECT<br/>log REJECT]
     N -- other --> Q[log OTHER<br/>reason, no action]
-
-    L --> RUN
 
     RUN --> T{Call's auth profile}
     T -- fal --> U[Key-header: Authorization: Key ...]
@@ -41,11 +42,8 @@ flowchart TD
     D --> Z[ledger.jsonl]
     F --> Z
     J --> Z
-    K --> Z
     P --> Z
     Q --> Z
-    H -- fresh lease reused --> R[log GRANT lease-reused]
-    R --> XS
     Y --> Z
 ```
 
