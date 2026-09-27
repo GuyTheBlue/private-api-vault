@@ -305,6 +305,79 @@ def cmd_list():
         print(f"{s}  (encrypted, {len(base64.b64decode(e['ct']))} bytes, added {e['created']})")
     return 0
 
+# ---------- bot config (Telegram token + chat id) ----------
+# Stored like any key (encrypted at rest). `bot_clear` removes them. The
+# TOKEN VALUE IS NEVER PRINTED — `bot info` only masks it. The chat id is a
+# non-secret handle and may be shown.
+BOT_TOKEN_SVC = "telegram_bot"
+BOT_CHAT_SVC   = "telegram_bot_chat"
+
+def bot_token(passphrase):
+    if BOT_TOKEN_SVC not in load_store():
+        return ""
+    return unwrap(BOT_TOKEN_SVC, passphrase)
+
+def bot_chat(passphrase):
+    if BOT_CHAT_SVC not in load_store():
+        return ""
+    return unwrap(BOT_CHAT_SVC, passphrase)
+
+def _mask(s):
+    if not s: return "(not set)"
+    if len(s) <= 4: return "*" * len(s)
+    return f"{s[:3]}**...**{s[-3:]}" if len(s) > 10 else "*" * len(s)
+
+def cmd_bot(argv, passphrase):
+    """bot set|info|update|clear  — manage the Telegram bot config.
+    token + chat id live in the encrypted store; the token is never printed."""
+    if not argv:
+        print("usage: ciphergate.py bot set|info|update|clear"); return 1
+    sub = argv[0].lower()
+    tid = bot_token(passphrase)
+    cid = bot_chat(passphrase)
+
+    if sub == "info":
+        print("Telegram bot config (login required — you're unlocked):")
+        print(f"  token   : {_mask(tid)}")
+        print(f"  chat id : {cid or '(not set)'}")
+        print(f"  configured: {'YES' if tid and cid else 'NO (set it with `bot set`)'}")
+        return 0
+
+    if sub in ("set", "update"):
+        tok = ask("VAULT_BOT_TOKEN", "Paste the Telegram bot token (hidden): ")
+        oid = ask("VAULT_BOT_CHAT", "Your Telegram chat id (the \"Sent from my iPhone\" you): ")
+        if not tok or not oid:
+            print("ABORT: both token and chat id are required."); return 1
+        rk = ask("VAULT_REC", "Recovery key (to keep the escrow): ")
+        store = load_store()
+        keep_tok = store.get(BOT_TOKEN_SVC)   # preserve escrow on overwrite
+        keep_chat = store.get(BOT_CHAT_SVC)
+        if BOT_TOKEN_SVC in store:
+            add_key(BOT_TOKEN_SVC, tok, passphrase, rk, keep_rec=keep_tok)
+        else:
+            add_key(BOT_TOKEN_SVC, tok, passphrase, rk)
+        if BOT_CHAT_SVC in store:
+            add_key(BOT_CHAT_SVC, oid, passphrase, rk, keep_rec=keep_chat)
+        else:
+            add_key(BOT_CHAT_SVC, oid, passphrase, rk)
+        log_event({"ev":"BOT_CONFIG","action":"set","by":"batman"})
+        print("Bot config stored ENCRYPTED.")
+        print(f"  token   : {_mask(tok)}")
+        print(f"  chat id : {oid}")
+        return 0
+
+    if sub == "clear":
+        store = load_store()
+        for svc in (BOT_TOKEN_SVC, BOT_CHAT_SVC):
+            if svc in store:
+                del store[svc]
+        save_store(store)
+        log_event({"ev":"BOT_CONFIG","action":"clear","by":"batman"})
+        print("Bot config cleared.")
+        return 0
+
+    print("usage: ciphergate.py bot set|info|update|clear"); return 1
+
 def who_is_running():
     """Answer 'who launched this?' from the Hermes HOME env. Caveat: env can
     be forged by a determined same-user process (Stage 4 is the real wall);
@@ -812,6 +885,7 @@ def main():
         "recover": lambda: cmd_recover(),
         "update": lambda: cmd_update(passphrase),
         "status": lambda: cmd_status(passphrase),
+        "bot": lambda: cmd_bot(args, passphrase),
         "ledger": lambda: cmd_ledger(),
     }
     fn = table.get(c)

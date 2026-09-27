@@ -163,5 +163,18 @@ S3=$(as_agent link https://api.digitalocean.com/v2/billing/history 5 "sneak bill
 echo "$S3" | grep -qi "WARNING\|flagged\|refusing" && ok "flagged request refused despite live lease" \
   || bad "flagged-not-refused-via-lease: $S3"
 
+# ---------- 16. bot config: set stores encrypted; info masks token; no plaintext; clear ----------
+step "bot config"
+BC1=$(VAULT_BOT_TOKEN=dummy_bot_token_ABC987 VAULT_BOT_CHAT=971695123 VAULT_PASS=$PASS VAULT_REC=$REC python3 vault.py bot set)
+echo "$BC1" | grep -qi "stored ENCRYPTED" && ok "bot set stores config encrypted" \
+  || bad "bot set did not report encrypted store: $BC1"
+BC2=$(VAULT_PASS=$PASS python3 vault.py bot info)
+echo "$BC2" | grep -qi "configured: YES" && ok "bot info shows configured" || bad "bot info not configured: $BC2"
+grep -q "dummy_bot_token_ABC987" .vault/keys.json && bad "bot TOKEN stored in PLAINTEXT!" || ok "no bot token plaintext at rest"
+BC3=$(VAULT_PASS=$PASS python3 vault.py bot clear)
+echo "$BC3" | grep -qi "cleared" && ok "bot clear removes config" || bad "bot clear failed: $BC3"
+BC4=$(VAULT_PASS=$PASS python3 vault.py bot info)
+echo "$BC4" | grep -qi "configured: NO" && ok "bot info reflects cleared after clear" || bad "bot info still configured after clear"
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi
