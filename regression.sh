@@ -211,5 +211,28 @@ echo "$R18b" | grep -qi "request key" && ok "DOCKER not covered by CLOUDFLARE le
   || { echo "$R18b" | grep -qi "ACTIVE LEASE" && bad "LEAK: docker covered by cloudflare lease" \
       || bad "docker-isolation unexpected: $R18b"; }
 
+# ---------- 19. resolve replay: a granted request key cannot be re-resolved ----------
+step "resolve replay (no double-grant)"
+# reuse a fresh request, decide yes, resolve, then resolve AGAIN -> must refuse
+K6=$(as_agent x_other POST https://api.r2/v2 0 "one-off replay" --keys fal | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+[ -n "$K6" ] && ok "replay request staged" || bad "no replay request key"
+VAULT_PASS=$PASS python3 vault.py decide "$K6" yes >/dev/null
+R19=$(VAULT_PASS=$PASS python3 vault.py resolve "$K6")
+R19b=$(VAULT_PASS=$PASS python3 vault.py resolve "$K6")
+echo "$R19b" | grep -qi "No pending entry" && ok "second resolve refused (entry purged after grant)" \
+  || bad "REPLAY: same key resolved twice: $R19b"
+
+# ---------- 20. recover preserves the access map (not wiped) ----------
+step "recover preserves access map"
+# grant link an access key first so there's something to preserve
+LK=$(VAULT_PASS=$PASS python3 vault.py keygen link 2>/dev/null | grep VAULT_AGENT_KEY | cut -d= -f2)
+VAULT_PASS=$PASS python3 vault.py access add link "$LK" >/dev/null 2>&1
+ACCT_BEFORE=$(VAULT_PASS=$PASS python3 vault.py access list | grep -c link)
+RC=$(VAULT_PASS=$PASS VAULT_NEW_PASS=passV3 VAULT_REC=$REC python3 vault.py recover 2>&1)
+echo "$RC" | grep -qi "Recovered" && ok "recover succeeded" || bad "recover failed: $RC"
+ACCT_AFTER=$(VAULT_PASS=passV3 python3 vault.py access list 2>&1 | grep -c link)
+[ "$ACCT_BEFORE" = "$ACCT_AFTER" ] && [ "$ACCT_BEFORE" -ge 1 ] && ok "recover preserved link's access registration" \
+  || bad "recover WIPED the access map (before=$ACCT_BEFORE after=$ACCT_AFTER)"
+
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi

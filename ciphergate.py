@@ -43,11 +43,12 @@ USAGE (all terminal)
   python3 ciphergate.py list                             names only, never values
   python3 ciphergate.py keygen <profile>                mint a .env key for a profile (shown once)
   python3 ciphergate.py access list|add|remove          manage .env-key map (passphrase)
-  python3 ciphergate.py request <http> <expiry_min> <reason>   run the decision gate (identity from env)
+  python3 ciphergate.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[key]'] [--data <json>]   run the decision gate (identity from env)
   python3 ciphergate.py pending                         show pending requests (passphrase)
   python3 ciphergate.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
   python3 ciphergate.py resolve <req_key>               agent returns: pick up the verdict
   python3 ciphergate.py lease                           active leases (passphrase)
+  python3 ciphergate.py call <method> <url> [--header "Name:[key_name]"] [--data <json>]  substitute+send (manual)
   python3 ciphergate.py ledger                          audit history (read-only)
   python3 ciphergate.py recover                         new passphrase via off-site recovery key
   python3 ciphergate.py update                          change the passphrase (needs current pass)
@@ -561,32 +562,23 @@ def cmd_request(argv, passphrase):
         expiry = int(argv[2])
     except ValueError:
         print("expiry must be minutes (0 = one-off, no lease requested)"); return 1
-    reason = " ".join(argv[3:]) if len(argv) > 3 else ""
-    # optional flags: --keys a,b | --header "Name:[key]" | --data <json>
+    # optional flags: --keys a,b | --header "Name:[key]" | --data <json>; the
+    # leftover words form the REASON (flags must not pollute it).
     keys, headers, data = [], {}, None
-    i = 0
     parts = []
-    while i < len(argv[3:]):
-        a = argv[3:][i]
+    i = 3
+    while i < len(argv):
+        a = argv[i]
         if a == "--keys":
-            keys = [k.strip() for k in argv[3:][i+1].split(",") if k.strip()]; i += 2
+            keys = [k.strip() for k in argv[i+1].split(",") if k.strip()]; i += 2
         elif a == "--header":
-            nv = argv[3:][i+1].split(":", 1)
+            nv = argv[i+1].split(":", 1)
             headers[nv[0].strip()] = nv[1].strip() if len(nv) > 1 else ""; i += 2
         elif a == "--data":
-            data = argv[3:][i+1]; i += 2
+            data = argv[i+1]; i += 2
         else:
             parts.append(a); i += 1
-    if keys:
-        # confirm every requested key EXISTS in the store (fail closed if a name is invented)
-        st = load_store()
-        missing = [k for k in keys if k not in st]
-        if missing:
-            log_event({"ev":"BAD_KEYS","runner":who_is_running(),"missing":"/".join(missing),"outcome":"DENY"})
-            print(f"DENIED: unknown key(s) requested: {', '.join(missing)}. 'Not in my city.'")
-            return 1
-    if reason == "" and parts:
-        reason = " ".join(parts)
+    reason = " ".join(parts)
 
     # WHO is knocking? runner derives from HOME env; its key must own it.
     runner, ok_id, why = verify_identity(passphrase)
@@ -596,6 +588,16 @@ def cmd_request(argv, passphrase):
         return 3
     agent = runner   # identity IS the running profile
     log_event({"ev":"IDENTITY","agent":agent,"outcome":"OK"})
+
+    # validate requested keys EXIST, but only AFTER identity passes — so an
+    # unauthenticated caller can't probe key names (fail closed if invented).
+    if keys:
+        st = load_store()
+        missing = [k for k in keys if k not in st]
+        if missing:
+            log_event({"ev":"BAD_KEYS","runner":agent,"missing":"/".join(missing),"outcome":"DENY"})
+            print(f"DENIED: unknown key(s) requested: {', '.join(missing)}. 'Not in my city.'")
+            return 1
 
     # SENSITIVITY GATE: hard NO-USE vs flag-for-Batman. Runs BEFORE the lease
     # so a live lease can't be used to smuggle a credential-mint call through.
@@ -711,6 +713,7 @@ def cmd_resolve(argv, passphrase):
 
     # verdict decided
     e2 = pending.pop(req_key) if e["status"] in ("yes", "no", "other") else e
+    save_pending(pending, passphrase)   # PERSIST the pop so a re-resolve can't replay the grant
     if e2["status"] == "yes":
         keys = e2.get("keys") or []
         # no lease requested (expiry=0) -> ONE call, then done. No lease record.
@@ -851,16 +854,24 @@ def cmd_recover():
         unwrap_rec(one, rk)
     except Exception:
         print("Recovery key rejected."); return 1
-    p1 = ask("VAULT_PASS", "New passphrase: "); p2 = ask("VAULT_PASS", "Repeat: ")
+    p1 = ask("VAULT_NEW_PASS", "New passphrase: "); p2 = ask("VAULT_NEW_PASS", "Repeat: ")
     if p1 != p2: print("Mismatch."); return 1
     for s in list(load_store().keys()):
         plain = unwrap_rec(s, rk)
         add_key(s, plain, p1, rk)
-    keys, ak = load_access(rk)
-    save_access(keys if ak == "ok" else {}, p1)
+    # Preserve the access map. Its HMAC is keyed to the LOST passphrase, so we
+    # can't verify it here — but possession of the valid recovery key (proven
+    # above by unwrap_rec) is the ownership gate. Read the raw data and re-sign
+    # it under the new passphrase rather than wiping every agent registration.
+    try:
+        raw = json.load(open(AF))
+        keys = raw.get("data", {}).get("keys", {})
+    except Exception:
+        keys = {}
+    save_access(keys, p1)
     save_leases([], p1)
     save_pending({}, p1)
-    log_event({"ev":"RECOVER","by":"batman"})
+    log_event({"ev":"RECOVER","by":"batman","access_preserved":len(keys)})
     print("Recovered. Keys + signed files re-encrypted/re-signed under new passphrase.")
     return 0
 
