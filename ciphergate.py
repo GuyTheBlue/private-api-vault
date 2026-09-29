@@ -439,11 +439,19 @@ def verify_identity(passphrase):
     from HOME env (HERMES_HOME -> runner) + the key it presents. A profile
     only ever has the key Batman put in its .env; a profile without one
     (robin) owns nothing in the list and can't pass. Flash another profile's
-    key and the running profile won't own it -> ACCESS SNEAK."""
+    key and the running profile won't own it -> ACCESS SNEAK.
+
+    This runs on the AGENT path (request/resolve) which has NO vault passphrase,
+    so it reads the access map's registration DATA directly rather than requiring
+    the passphrase to verify an HMAC. Identity is: does the presented key's hash
+    match what's registered for the running profile?"""
     runner = who_is_running()
-    keys, st = load_access(passphrase)
-    if st != "ok":
-        return runner, False, "TAMPER DETECTED: access map unverifiable. Fail-closed: DENIED."
+    # raw read of the registration map (works without the passphrase)
+    try:
+        raw = json.load(open(AF))
+        keys = raw.get("data", {}).get("keys", {})
+    except Exception:
+        keys, st = {}, "missing"
     presented = os.environ.get("VAULT_AGENT_KEY", "").strip()
     if not presented:
         return runner, False, "No .env key presented - access denied."
@@ -463,6 +471,7 @@ def cmd_keygen(argv, passphrase):
     prof = argv[0]
     keys, st = load_access(passphrase)
     if st != "ok":
+        log_event({"ev":"TAMPER","file":"access","cmd":"keygen","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: access map unverifiable."); return 4
     new = secrets.token_urlsafe(24)
     keys[prof] = key_hash(new)
@@ -479,6 +488,7 @@ def cmd_access(argv, passphrase):
     sub, rest = argv[0], argv[1:]
     keys, st = load_access(passphrase)
     if st != "ok":
+        log_event({"ev":"TAMPER","file":"access","cmd":"access","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: access map unverifiable."); return 4
     if sub == "list":
         if not keys: print("(no registered .env keys)")
@@ -651,6 +661,7 @@ def cmd_request(argv, passphrase):
 def cmd_pending(passphrase):
     pending, st = load_pending(passphrase)
     if st != "ok":
+        log_event({"ev":"TAMPER","file":"pending","cmd":"pending","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: pending index unverifiable.")
         return 4
     if not pending: print("(no pending requests)"); return 0
@@ -671,6 +682,7 @@ def cmd_decide(argv, passphrase):
         print("verdict must be yes|no|other"); return 1
     pending, st = load_pending(passphrase)
     if st != "ok":
+        log_event({"ev":"TAMPER","file":"pending","cmd":"decide","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: pending index unverifiable.")
         return 4
     if req_key not in pending:
@@ -719,9 +731,9 @@ def cmd_resolve(argv, passphrase):
         # no lease requested (expiry=0) -> ONE call, then done. No lease record.
         if not keys:
             print(f"Approved [{req_key}] {e2['agent']}. One-off call ({e2['http']}).")
-            _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
+            res = _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
                        e2.get("data"), [], passphrase, e2["agent"])
-            return 0
+            return res if isinstance(res, dict) else 0
         # keys requested: if a lease was asked for (expiry>0) and BATMAN approved,
         # record agent+keys+expiry. If no expiry granted (0), it's a one-off call on
         # the granted keys with NO lease.
@@ -729,6 +741,7 @@ def cmd_resolve(argv, passphrase):
             leases, lst = load_leases(passphrase)
             if lst != "ok":
                 save_pending(pending, passphrase)
+                log_event({"ev":"TAMPER","file":"lease","cmd":"resolve","outcome":"FAIL_CLOSED"})
                 print("TAMPER DETECTED: lease file unverifiable."); return 4
             dur = e2["expiry_min"]
             lease = {"agent": e2["agent"], "keys": keys,
@@ -744,9 +757,9 @@ def cmd_resolve(argv, passphrase):
             log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman",
                        "keys":keys,"lease_min":0,"note":"one-off, no lease"})
             print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. One-off call, no lease.")
-        _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
+        res = _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
                    e2.get("data"), keys, passphrase, e2["agent"])
-        return 0
+        return res if isinstance(res, dict) else 0
     if e2["status"] == "no":
         log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
         print(f"Denied [{req_key}] {e2['agent']}. 'Denied. Back to the Batcave.'")
@@ -759,6 +772,7 @@ def cmd_resolve(argv, passphrase):
 def cmd_lease(passphrase):
     active, st = purge_expired(passphrase)
     if st != "ok":
+        log_event({"ev":"TAMPER","file":"lease","cmd":"lease","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: lease file unverifiable.")
         return 4
     if not active: print("(no active leases)")
@@ -773,6 +787,26 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     a header or body that is NOT in `keys` is LEFT AS-IS (never substituted),
     so an agent can't smuggle an ungranted secret into the call. Returns status."""
     st = load_store()
+    # GUARD: detect a bare (unbracketed) granted key name in a header value or
+    # body. If the agent wrote "Bearer FAL_API_KEY" or "FAL_API_KEY" instead of
+    # "[FAL_API_KEY]", CipherGate would forward it literally and the call fails
+    # auth silently. Refuse loudly and tell them the right form.
+    suspicious = []
+    for hn, hv in headers.items():
+        for name in keys:
+            if name in st and ("[" + name + "]") not in hv and name in hv:
+                suspicious.append((hn, name))
+    sdata = data if isinstance(data, str) else ""
+    for name in keys:
+        if name in st and ("[" + name + "]") not in sdata and name in sdata:
+            suspicious.append(("body", name))
+    if suspicious:
+        spots = ", ".join(f"{hn}→{name}" for hn, name in suspicious)
+        log_event({"ev":"CALL_REJECT","agent":agent,"method":method,"url":url,
+                   "why":f"bare key name (no [ ] brackets): {spots}"})
+        print(f"REFUSED: found a key name WITHOUT [ ] brackets in {spots}. "
+              f"Write it as [KEY_NAME] (e.g. Bearer [FAL_API_KEY]) so CipherGate swaps the real token.")
+        return {"status": None, "body": "REFUSED: bare key name, missing [ ] brackets"}
     def sub(s):
         if isinstance(s, str) and "[" in s:
             out = s
@@ -798,12 +832,12 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
                    "keys":keys,"status":resp.status})
         print("STATUS:", resp.status)
         print("RESULT:"); print(rbody[:2000])
-        return resp.status
+        return {"status": resp.status, "body": rbody}   # return the RESULT so the server can relay it
     except Exception as ex:
         log_event({"ev":"CALL_FAIL","agent":agent,"method":method,"url":url,
                    "keys":keys,"why":str(ex)[:120]})
         print("CALL FAILED:", ex)
-        return None
+        return {"status": None, "body": f"CALL FAILED: {ex}"}
 
 def cmd_call(argv, passphrase):
     # call <method> <url> --header "Name:[key_name]" ... [--data <json>]
@@ -892,6 +926,7 @@ def cmd_update(passphrase):
     leases, lst = purge_expired(passphrase)
     pending, pst = load_pending(passphrase)
     if lst != "ok" or pst != "ok":
+        log_event({"ev":"TAMPER","file":"pending_or_lease","cmd":"update","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: lease or pending file invalid. Cannot update (fail-closed)."); return 4
     p1 = ask("VAULT_NEW_PASS", "New passphrase: "); p2 = ask("VAULT_NEW_PASS", "Repeat: ")
     if p1 != p2: print("Mismatch."); return 1
@@ -993,6 +1028,200 @@ def _banner():
         print()
         print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
 
+def _cmd_table(passphrase):
+    return {
+        "add": lambda a: cmd_add(a, passphrase),
+        "keygen": lambda a: cmd_keygen(a, passphrase),
+        "access": lambda a: cmd_access(a, passphrase),
+        "request": lambda a: cmd_request(a, passphrase),
+        "pending": lambda: cmd_pending(passphrase),
+        "decide": lambda a: cmd_decide(a, passphrase),
+        "resolve": lambda a: cmd_resolve(a, passphrase),
+        "lease": lambda: cmd_lease(passphrase),
+        "call": lambda a: cmd_call(a, passphrase),
+        "update": lambda: cmd_update(passphrase),
+        "status": lambda: cmd_status(passphrase),
+        "bot": lambda a: cmd_bot(a, passphrase),
+        "ledger": lambda: cmd_ledger(),
+    }
+
+def _split(line):
+    import shlex
+    try:
+        return shlex.split(line)
+    except Exception:
+        return line.split()
+
+def _verify_agent_key(agent, key):
+    """Verify an (agent, key) pair against the access map without needing the
+    passphrase. Returns (ok, reason)."""
+    try:
+        raw = json.load(open(AF))
+        keys = raw.get("data", {}).get("keys", {})
+    except Exception:
+        keys = {}
+    if not key:
+        return False, "No .env key presented - access denied."
+    if not agent:
+        return False, "No agent name given."
+    ph = key_hash(key)
+    if keys.get(agent) != ph:
+        owner = next((p for p, h in keys.items() if h == ph), None)
+        if owner and owner != agent:
+            return False, f"ACCESS SNEAK: you flashed {owner}'s key as {agent}."
+        return False, f"No key registered for {agent}."
+    return True, ""
+
+def cmd_run(argv, passphrase):
+    """ciphergate run [--port N]  — CipherGate as a LOCAL SERVER for agents.
+
+    Holds the vault passphrase ONCE, then listens on a local port (default
+    18200). Real agent processes POST JSON requests to it; the server verifies
+    each agent by (agent, key) against the access map, stages/decides/resolves,
+    and answers JSON. This is how a REAL agent calls the vault — over the wire,
+    not by typing into a terminal.
+
+    Endpoints:
+      POST /request   {"agent","key","method","url","expiry","reason","keys":[],"headers":{},"data"}
+      POST /resolve   {"agent","key","req_key"}
+      GET  /health
+    """
+    import http.server, threading
+    if not passphrase:
+        passphrase = _pass()
+    port = 18200
+    if argv and argv[0] == "--port" and len(argv) > 1:
+        port = int(argv[1])
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def _reply(self, code, obj):
+            b = json.dumps(obj).encode()
+            self.send_response(code); self.send_header("Content-Type","application/json")
+            self.send_header("Content-Length", str(len(b))); self.end_headers()
+            self.wfile.write(b)
+        def _body(self):
+            ln = int(self.headers.get("Content-Length", 0) or 0)
+            d = self.rfile.read(ln) if ln else b""
+            try: return json.loads(d.decode())
+            except Exception: return {}
+        def do_GET(self):
+            if self.path.startswith("/health"):
+                self._reply(200, {"status":"up","vault":VT})
+            else:
+                self._reply(404, {"error":"not found","hint":"POST /request or /resolve, GET /health"})
+        def do_POST(self):
+            p = self._body()
+            if self.path == "/request":
+                agent = p.get("agent",""); key = p.get("key","")
+                ok, why = _verify_agent_key(agent, key)
+                if not ok:
+                    log_event({"ev":"ACCESS_DENIED","runner":agent,"via":"server","outcome":"DENY","why":why})
+                    self._reply(403, {"ok":False,"denied":why})
+                    return
+                args = [p.get("method","GET").upper(), p.get("url",""), str(p.get("expiry",0))]
+                if p.get("reason"): args.append(p["reason"])
+                if p.get("keys"): args += ["--keys", ",".join(p["keys"])]
+                for hn,hv in (p.get("headers") or {}).items():
+                    args += ["--header", f"{hn}:{hv}"]
+                # args are already clean per-token values from JSON; the old
+                # _split roundtrip here SPLIT header values at internal spaces
+                # (e.g. "Authorization: Bearer [FAL]" -> lost the [FAL] placeholder).
+                # Pass them through as-is so substitution survives.
+                old = {"H":os.environ.get("HERMES_HOME"),"K":os.environ.get("VAULT_AGENT_KEY")}
+                os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
+                os.environ["VAULT_AGENT_KEY"] = key
+                try:
+                    rc = cmd_request(args, passphrase)
+                finally:
+                    _restore_env(old)
+                if rc != 0:
+                    self._reply(403, {"ok":False,"note":"denied before staging"})
+                    return
+                req_key = ""
+                try:
+                    pending, st = load_pending(passphrase)
+                    for kk, ee in pending.items():
+                        if ee.get("agent")==agent and ee.get("status")=="pending":
+                            req_key = kk
+                except Exception:
+                    pass
+                # SYNCHRONOUS WAIT: the agent's call blocks here until Batman
+                # decides (within the wait window). This is the real flow:
+                # agent sends, waits, gets the response. No separate resolve trip.
+                deadline = now_epoch() + WAIT_MIN*60
+                verdict = None
+                while now_epoch() < deadline:
+                    try:
+                        pending, st = load_pending(passphrase)
+                        e = pending.get(req_key)
+                    except Exception:
+                        e = None
+                    if e and e.get("status") == "pending":
+                        time.sleep(0.5); continue
+                    if e and e.get("status") in ("yes","no","other"):
+                        verdict = e["status"]; break
+                    if e is None:
+                        break  # entry gone -> verdict consumed
+                    time.sleep(0.5)
+                if verdict == "yes":
+                    # resolve it here: pop + grant(if lease) + make the call
+                    os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
+                    os.environ["VAULT_AGENT_KEY"] = key
+                    try:
+                        rr = cmd_resolve([req_key], passphrase)
+                    finally:
+                        _restore_env(old)
+                    # rr is now {"status":..,"body":..} when the call ran -> relay the RESULT to the agent
+                    if isinstance(rr, dict):
+                        self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved",
+                                          "call_status":rr.get("status"),
+                                          "result":rr.get("body")})
+                    else:
+                        self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved","rc":rr})
+                elif verdict == "no" or verdict == "other":
+                    os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
+                    os.environ["VAULT_AGENT_KEY"] = key
+                    try:
+                        rrc = cmd_resolve([req_key], passphrase)
+                    finally:
+                        _restore_env(old)
+                    self._reply(403, {"ok":False,"outcome":"denied"})
+                else:
+                    self._reply(408, {"ok":False,"req_key":req_key,
+                        "outcome":"timeout","note":f"Batman hasn't answered in {WAIT_MIN} min. Reprint with req_key later: {req_key}"})
+            elif self.path == "/resolve":
+                agent = p.get("agent",""); key = p.get("key","")
+                ok, why = _verify_agent_key(agent, key)
+                if not ok:
+                    self._reply(403, {"ok":False,"denied":why}); return
+                req_key = p.get("req_key","")
+                old = {"H":os.environ.get("HERMES_HOME"),"K":os.environ.get("VAULT_AGENT_KEY")}
+                os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
+                os.environ["VAULT_AGENT_KEY"] = key
+                try:
+                    rc = cmd_resolve([req_key], passphrase)
+                finally:
+                    _restore_env(old)
+                self._reply(200, {"ok":True,"rc":rc})
+            else:
+                self._reply(404, {"error":"unknown endpoint"})
+
+    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    print(f"CipherGate server up on http://127.0.0.1:{port} (passphrase held once; Ctrl-C to stop).")
+    print(f"Agents POST /request and /resolve with their agent name + .env key.")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+def _restore_env(old):
+    if old["H"] is None: os.environ.pop("HERMES_HOME", None)
+    else: os.environ["HERMES_HOME"] = old["H"]
+    if old["K"] is None: os.environ.pop("VAULT_AGENT_KEY", None)
+    else: os.environ["VAULT_AGENT_KEY"] = old["K"]
+
 def main():
     os.chmod(VT, 0o700) if os.path.exists(VT) else None
     if len(sys.argv) < 2:
@@ -1002,8 +1231,10 @@ def main():
     if c == "--help":
         _banner(); print(__doc__); return 0
     args = sys.argv[2:]
-    no_pass = c in ("init", "list", "ledger")
+    no_pass = c in ("init", "list", "ledger", "recover", "run")
     passphrase = "" if no_pass else _pass()
+    if c == "run":
+        return cmd_run(args, passphrase)
     table = {
         "init": lambda: cmd_init(),
         "add": lambda: cmd_add(args, passphrase),

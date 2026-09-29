@@ -3,6 +3,11 @@
 # copies to an isolated scratch dir). Run after ANY change to ciphergate.py.
 #   Usage: bash regression.sh [path/to/ciphergate.py]
 set -uo pipefail
+# CRITICAL: clear every vault env var the suite could inherit from the shell.
+# If any VAULT_PASS/VAULT_REC/VAULT_NEW_PASS/VAULT_VALUE leaks in from outside,
+# it silently satisfies a prompt and MASKS a bug (the recover-prompt bug was
+# hidden exactly this way). The suite owns its env entirely.
+unset VAULT_PASS VAULT_REC VAULT_NEW_PASS VAULT_VALUE VAULT_AGENT_KEY VAULT_BOT_TOKEN VAULT_BOT_CHAT VAULT_WAIT_MIN HERMES_HOME 2>/dev/null || true
 VAULT_PY="${1:-/Volumes/Secure/private_api_vault/ciphergate.py}"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -26,7 +31,7 @@ export VAULT_REC=$REC
 
 # ---------- 2. mint keys for the profiles later tests use ----------
 step "mint .env keys"
-for p in link oracle x_other x_no x_timeout evil; do mint "$p"; done
+for p in link oracle x_other x_no x_timeout evil x_bare; do mint "$p"; done
 ok "keys minted for all tested profiles"
 
 # fake API key in the store so key-scoped lease tests have something to lease
@@ -222,17 +227,53 @@ R19b=$(VAULT_PASS=$PASS python3 vault.py resolve "$K6")
 echo "$R19b" | grep -qi "No pending entry" && ok "second resolve refused (entry purged after grant)" \
   || bad "REPLAY: same key resolved twice: $R19b"
 
-# ---------- 20. recover preserves the access map (not wiped) ----------
-step "recover preserves access map"
+# ---------- 20. recover: NO current passphrase needed (recovery key only) + preserves access map ----------
+step "recover: recovery-key only + preserves access map"
 # grant link an access key first so there's something to preserve
 LK=$(VAULT_PASS=$PASS python3 vault.py keygen link 2>/dev/null | grep VAULT_AGENT_KEY | cut -d= -f2)
 VAULT_PASS=$PASS python3 vault.py access add link "$LK" >/dev/null 2>&1
 ACCT_BEFORE=$(VAULT_PASS=$PASS python3 vault.py access list | grep -c link)
-RC=$(VAULT_PASS=$PASS VAULT_NEW_PASS=passV3 VAULT_REC=$REC python3 vault.py recover 2>&1)
-echo "$RC" | grep -qi "Recovered" && ok "recover succeeded" || bad "recover failed: $RC"
+# CRITICAL: do NOT set VAULT_PASS here. recover must run from the recovery key
+# ALONE. If it needed the current passphrase, the gotcha it'd otherwise be
+# masked by feeding VAULT_PASS. any error = recover wrongly requires current pass.
+RC=$(VAULT_NEW_PASS=passV3 VAULT_REC=$REC python3 vault.py recover 2>&1)
+echo "$RC" | grep -qi "Recovered" && ok "recover ran from recovery key alone (no current pass needed)" \
+  || bad "recover required current passphrase or failed: $RC"
 ACCT_AFTER=$(VAULT_PASS=passV3 python3 vault.py access list 2>&1 | grep -c link)
 [ "$ACCT_BEFORE" = "$ACCT_AFTER" ] && [ "$ACCT_BEFORE" -ge 1 ] && ok "recover preserved link's access registration" \
   || bad "recover WIPED the access map (before=$ACCT_BEFORE after=$ACCT_AFTER)"
+# old pass must be dead under the new one
+OLDDEAD=$(VAULT_PASS=$PASS python3 vault.py lease 2>&1)
+echo "$OLDDEAD" | grep -qi "rejected\|TAMPER" && ok "old passphrase dead after recovery" || bad "old pass still accepted"
+
+# ---------- 21. bare key name guard ----------
+step "bare key name is refused + CALL_REJECT logged"
+LEDGER="$SCRATCH/.vault/ledger.jsonl"
+BKPROF=x_bare; eval "BK__KEY=\$KEY_$BKPROF"
+BK=$(HERMES_HOME="/Users/guymeaker/.hermes/profiles/x_bare" VAULT_AGENT_KEY="$BK__KEY" VAULT_PASS=passV3 python3 vault.py request GET https://api.fal.ai/render 0 "bare key test" --keys fal --header "Authorization: Bearer fal" 2>&1)
+echo "$BK" | grep -qi "denied before staging" && ok "bare-key request refused before staging" || {
+BKKEY=$(echo "$BK" | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+[ -n "$BKKEY" ] && VAULT_PASS=passV3 python3 vault.py decide "$BKKEY" yes >/dev/null 2>&1
+GB=$(VAULT_PASS=passV3 python3 vault.py resolve "$BKKEY" 2>&1)
+echo "$GB" | grep -qi "REFUSED: bare key name" && ok "bare key name refused by guard" || bad "bare key name NOT refused: $GB"
+grep -q '"ev": *"CALL_REJECT"' "$LEDGER" && ok "CALL_REJECT logged to ledger" || bad "no CALL_REJECT ledger event"
+}
+
+# ---------- 22. tamper writes to the ledger ----------
+step "tamper is logged (not silent)"
+LEDGER="$SCRATCH/.vault/ledger.jsonl"
+# corrupt the pending file's signature, then try to use it -> fail-closed + ledger event
+LEDGER_BEFORE=$(wc -l < "$LEDGER" 2>/dev/null || echo 0)
+python3 - "$SCRATCH/.vault/pending.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d["sig"]="0"*64  # break the HMAC
+json.dump(d,open(sys.argv[1],"w"))
+PY
+TAMPER_OUT=$(VAULT_PASS=$PASS python3 vault.py pending 2>&1)
+echo "$TAMPER_OUT" | grep -qi "TAMPER DETECTED" && ok "pending tamper is refuse-closed" || bad "tampered pending not refused: $TAMPER_OUT"
+LEDGER_AFTER=$(wc -l < "$LEDGER" 2>/dev/null || echo 0)
+[ "$LEDGER_AFTER" -gt "$LEDGER_BEFORE" ] && grep -q '"ev": *"TAMPER"' "$LEDGER" && ok "tamper event written to ledger" || bad "no TAMPER ledger event (before=$LEDGER_BEFORE after=$LEDGER_AFTER)"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "ALL REGRESSION TESTS PASS ($SCRATCH, cleaned)"; else echo "REGRESSION FAILURES DETECTED"; exit 1; fi
