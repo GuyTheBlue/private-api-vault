@@ -103,6 +103,18 @@ def derive_key(secret, salt, iters=200000):
 def new_rec_key():
     return os.urandom(32).hex()
 
+def valid_rec_key(k):
+    """A recovery key is a 64-char hex string (32 bytes = AES-256 key). Returns
+    True only if it's non-empty hex of the right length. A wrong key (garbage
+    or non-hex) should fail CLEANLY, not blow up mid-encrypt with a traceback."""
+    if not k or len(k) != 64:
+        return False
+    try:
+        bytes.fromhex(k)
+        return True
+    except ValueError:
+        return False
+
 # ---------- store ----------
 def load_store():
     if not os.path.exists(KF):
@@ -134,6 +146,26 @@ def add_key(service, value, passphrase, rec_key, keep_rec=None):
         "dk_rec": dk_rec.decode() if isinstance(dk_rec, bytes) else dk_rec, "iv3": iv3,
         "created": now_iso(), "note": ""
     }
+    save_store(store)
+
+def update_value(service, value, passphrase):
+    """OVERWRITE an existing key's VALUE but PRESERVE its data key + recovery
+    escrow. A naive reuse of add_key mints a NEW data key and keeps the OLD
+    recovery escrow wrapping the OLD key — so after an edit the recovery key
+    decrypts a stale key and returns garbage (the exact bug fixed here). This
+    recovers the current dk via the passphrase, re-encrypts the new value under
+    the SAME dk, and leaves dk/dk_rec/iv3 IDENTICAL. Requires the key to exist."""
+    store = load_store()
+    e = store[service]
+    salt = base64.b64decode(e["salt"])
+    pk = derive_key(passphrase, salt)
+    dk = aes_crypt(pk, e["iv2"], base64.b64decode(e["dk_pass"]), decrypt=True).hex()
+    iv1 = os.urandom(16).hex()
+    ct = aes_crypt(dk, iv1, value.encode())
+    e["ct"] = base64.b64encode(ct).decode()
+    e["iv1"] = iv1
+    e["note"] = (e.get("note", "") + " updated " + now_iso()).strip()
+    store[service] = e
     save_store(store)
 
 def rekey_passphrase(service, old_pass, new_pass):
@@ -235,12 +267,21 @@ def purge_expired(passphrase):
         save_leases(keep, passphrase)
     return keep, "ok"
 
-def active_lease(agent, key, passphrase):
+def active_lease(agent, keys, passphrase):
+    """Return the live lease covering THIS agent for ALL of the given keys.
+    keys is a list of secret names (e.g. ['CLOUDFLARE_R2_ACCESS_KEY_ID',
+    'CLOUDFLARE_R2_SECRET_ACCESS_KEY']). A lease is scoped to the exact secret
+    names it was granted for — NEVER '*'. So a CLOUDFLARE lease never covers
+    DOCKER_TOKEN."""
     active, st = purge_expired(passphrase)
     if st != "ok":
         return None
+    keyset = set(keys)
     for l in active:
-        if l.get("agent") == agent and (key == "*" or l.get("key") == key):
+        if l.get("agent") != agent:
+            continue
+        granted = set(l.get("keys", []))
+        if keyset and granted and keyset <= granted:   # lease covers ALL requested keys
             return l
     return None
 
@@ -288,12 +329,17 @@ def cmd_add(argv, passphrase):
     value = ask("VAULT_VALUE", "Paste the API key value (hidden): ")
     store = load_store()
     if service in store:
-        e = store[service]
-        rk = ask("VAULT_REC", "Recovery key (to keep escrow): ")
-        add_key(service, value, passphrase, rk, keep_rec=e)
-    else:
-        rk = ask("VAULT_REC", "Recovery key (store value, once): ")
-        add_key(service, value, passphrase, rk)
+        # OVERWRITE: preserve the data key + recovery escrow so the recovery key
+        # still decrypts the new value (update_value recovers dk via passphrase).
+        update_value(service, value, passphrase)
+        log_event({"ev":"KEY_UPDATE","service":service})
+        print(f"UPDATED {service} ENCRYPTED ({len(value)} chars); recovery escrow unchanged.")
+        return 0
+    rk = ask("VAULT_REC", "Recovery key (store value, once): ")
+    if not valid_rec_key(rk):
+        print("INVALID recovery key: it must be the 64-char hex key printed at init. Not stored.")
+        return 1
+    add_key(service, value, passphrase, rk)
     log_event({"ev":"KEY_ADD","service":service})
     print(f"Stored {service} ENCRYPTED ({len(value)} chars).")
     return 0
@@ -348,18 +394,16 @@ def cmd_bot(argv, passphrase):
         oid = ask("VAULT_BOT_CHAT", "Your Telegram chat id (the \"Sent from my iPhone\" you): ")
         if not tok or not oid:
             print("ABORT: both token and chat id are required."); return 1
-        rk = ask("VAULT_REC", "Recovery key (to keep the escrow): ")
         store = load_store()
-        keep_tok = store.get(BOT_TOKEN_SVC)   # preserve escrow on overwrite
-        keep_chat = store.get(BOT_CHAT_SVC)
-        if BOT_TOKEN_SVC in store:
-            add_key(BOT_TOKEN_SVC, tok, passphrase, rk, keep_rec=keep_tok)
-        else:
-            add_key(BOT_TOKEN_SVC, tok, passphrase, rk)
-        if BOT_CHAT_SVC in store:
-            add_key(BOT_CHAT_SVC, oid, passphrase, rk, keep_rec=keep_chat)
-        else:
-            add_key(BOT_CHAT_SVC, oid, passphrase, rk)
+        for svc, val in ((BOT_TOKEN_SVC, tok), (BOT_CHAT_SVC, oid)):
+            if svc in store:
+                update_value(svc, val, passphrase)      # keep dk + recovery escrow
+            else:
+                rk = ask("VAULT_REC", "Recovery key (new bot config; store escrow): ")
+                if not valid_rec_key(rk):
+                    print("INVALID recovery key: it must be the 64-char hex key printed at init. Not stored.")
+                    return 1
+                add_key(svc, val, passphrase, rk)
         log_event({"ev":"BOT_CONFIG","action":"set","by":"batman"})
         print("Bot config stored ENCRYPTED.")
         print(f"  token   : {_mask(tok)}")
@@ -508,13 +552,41 @@ def classify_request(http):
     return "ok", ""
 
 def cmd_request(argv, passphrase):
-    if len(argv) < 3: print("usage: vault.py request <http> <expiry_min> <reason>"); return 1
-    http = argv[0]
+    if len(argv) < 3:
+        print("usage: vault.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>]")
+        return 1
+    method = argv[0].upper()
+    http = argv[1]
     try:
-        expiry = int(argv[1])
+        expiry = int(argv[2])
     except ValueError:
-        print("expiry must be minutes (0 = no lift requested)"); return 1
-    reason = " ".join(argv[2:])
+        print("expiry must be minutes (0 = one-off, no lease requested)"); return 1
+    reason = " ".join(argv[3:]) if len(argv) > 3 else ""
+    # optional flags: --keys a,b | --header "Name:[key]" | --data <json>
+    keys, headers, data = [], {}, None
+    i = 0
+    parts = []
+    while i < len(argv[3:]):
+        a = argv[3:][i]
+        if a == "--keys":
+            keys = [k.strip() for k in argv[3:][i+1].split(",") if k.strip()]; i += 2
+        elif a == "--header":
+            nv = argv[3:][i+1].split(":", 1)
+            headers[nv[0].strip()] = nv[1].strip() if len(nv) > 1 else ""; i += 2
+        elif a == "--data":
+            data = argv[3:][i+1]; i += 2
+        else:
+            parts.append(a); i += 1
+    if keys:
+        # confirm every requested key EXISTS in the store (fail closed if a name is invented)
+        st = load_store()
+        missing = [k for k in keys if k not in st]
+        if missing:
+            log_event({"ev":"BAD_KEYS","runner":who_is_running(),"missing":"/".join(missing),"outcome":"DENY"})
+            print(f"DENIED: unknown key(s) requested: {', '.join(missing)}. 'Not in my city.'")
+            return 1
+    if reason == "" and parts:
+        reason = " ".join(parts)
 
     # WHO is knocking? runner derives from HOME env; its key must own it.
     runner, ok_id, why = verify_identity(passphrase)
@@ -534,17 +606,21 @@ def cmd_request(argv, passphrase):
         return 9
     flagged = verdict == "flag"
 
-    lease = active_lease(agent, "*", passphrase)
-    if lease:
-        if flagged:
-            log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE_FLAG",
-                       "key":lease.get("key"),"why":detail})
-            print(f"WARNING: live lease would cover {agent}, but this is FLAGGED: {detail}")
-            print(f"Refusing without Batman. Ask again or get explicit approval.")
-            return 9
-        log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE","key":lease.get("key")})
-        print(f"ACTIVE LEASE covers {agent} (expires {lease['expires_iso']}). Making the call (Batman not asked).")
-        return 0
+    # LEASE: if a live lease covers agent+ALL requested keys, use it (no ask).
+    if keys:
+        lease = active_lease(agent, keys, passphrase)
+        if lease:
+            if flagged:
+                log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE_FLAG",
+                           "keys":keys,"why":detail})
+                print(f"WARNING: live lease would cover {agent} for {','.join(keys)}, but this is FLAGGED: {detail}")
+                print("Refusing without Batman. Ask again or get explicit approval.")
+                return 9
+            log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE",
+                       "keys":keys,"expires":lease.get("expires_iso")})
+            print(f"ACTIVE LEASE covers {agent} for [{','.join(keys)}] (expires {lease['expires_iso']}).")
+            _exec_call(method, http, headers, data, keys, passphrase, agent)
+            return 0
 
     # No lease -> stage a PENDING entry with a UNIQUE key, ask Batman.
     req_key = secrets.token_hex(8)
@@ -554,16 +630,19 @@ def cmd_request(argv, passphrase):
         print("TAMPER DETECTED: pending index unverifiable. Fail-closed: DENIED.")
         return 4
     pending[req_key] = {
-        "agent": agent, "http": http, "reason": reason, "expiry_min": expiry,
+        "agent": agent, "method": method, "http": http, "reason": reason,
+        "expiry_min": expiry, "keys": keys, "headers": headers, "data": data,
         "asked_at": now_iso(), "asked_epoch": now_epoch(), "status": "pending",
         "msg": "", "lease_created": False,
         "flag": detail if flagged else "",
     }
     save_pending(pending, passphrase)
-    log_event({"ev":"PENDING","agent":agent,"http":http,"reason":reason,
-               "expiry_min":expiry,"req_key":req_key,"outcome":"ASK_BATMAN","flag":detail if flagged else ""})
+    log_event({"ev":"PENDING","agent":agent,"method":method,"http":http,"reason":reason,
+               "expiry_min":expiry,"keys":keys,"req_key":req_key,"outcome":"ASK_BATMAN",
+               "flag":detail if flagged else ""})
     flag_txt = f"  [FLAGGED: {detail} - Batman, look before you approve]" if flagged else ""
-    print(f"{agent}: no lease. Staged with request key {req_key}; handed to Batman to approve.{flag_txt}")
+    key_txt = f"  keys: [{','.join(keys)}]" if keys else ""
+    print(f"{agent}: no lease. Staged request key {req_key}.{key_txt} Handed to Batman to approve.{flag_txt}")
     print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
     return 0
 
@@ -633,19 +712,37 @@ def cmd_resolve(argv, passphrase):
     # verdict decided
     e2 = pending.pop(req_key) if e["status"] in ("yes", "no", "other") else e
     if e2["status"] == "yes":
-        leases, lst = load_leases(passphrase)
-        if lst != "ok":
-            print("TAMPER DETECTED: lease file unverifiable.")
-            return 4
-        dur = e2.get("expiry_min", 0) or 5
-        lease = {"agent": e2["agent"], "key": "*", "http": e2["http"],
-                 "expires_at": now_epoch() + dur * 60,
-                 "expires_iso": (datetime.datetime.now(datetime.timezone.utc) +
-                                 datetime.timedelta(minutes=dur)).strftime("%Y-%m-%dT%H:%M:%SZ")}
-        leases.append(lease)
-        save_leases(leases, passphrase)
-        log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman","lease_min":dur})
-        print(f"Approved [{req_key}] {e2['agent']}. Lease {dur} min ({e2['http']}). Key used internally for the call.")
+        keys = e2.get("keys") or []
+        # no lease requested (expiry=0) -> ONE call, then done. No lease record.
+        if not keys:
+            print(f"Approved [{req_key}] {e2['agent']}. One-off call ({e2['http']}).")
+            _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
+                       e2.get("data"), [], passphrase, e2["agent"])
+            return 0
+        # keys requested: if a lease was asked for (expiry>0) and BATMAN approved,
+        # record agent+keys+expiry. If no expiry granted (0), it's a one-off call on
+        # the granted keys with NO lease.
+        if e2.get("expiry_min", 0) > 0:
+            leases, lst = load_leases(passphrase)
+            if lst != "ok":
+                save_pending(pending, passphrase)
+                print("TAMPER DETECTED: lease file unverifiable."); return 4
+            dur = e2["expiry_min"]
+            lease = {"agent": e2["agent"], "keys": keys,
+                     "expires_at": now_epoch() + dur * 60,
+                     "expires_iso": (datetime.datetime.now(datetime.timezone.utc) +
+                                     datetime.timedelta(minutes=dur)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            leases.append(lease)
+            save_leases(leases, passphrase)
+            log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman",
+                       "keys":keys,"lease_min":dur,"expires":lease["expires_iso"]})
+            print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. Lease {dur} min.")
+        else:
+            log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman",
+                       "keys":keys,"lease_min":0,"note":"one-off, no lease"})
+            print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. One-off call, no lease.")
+        _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
+                   e2.get("data"), keys, passphrase, e2["agent"])
         return 0
     if e2["status"] == "no":
         log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
@@ -663,14 +760,53 @@ def cmd_lease(passphrase):
         return 4
     if not active: print("(no active leases)")
     for l in active:
-        print(f"{l['agent']}  key={l.get('key')}  http={l.get('http','')}  expires {l.get('expires_iso')}")
+        keys = ",".join(l.get("keys") or []) or "*"
+        print(f"{l['agent']}  keys=[{keys}]  http={l.get('http','')}  expires {l.get('expires_iso')}")
     return 0
 
+def _exec_call(method, url, headers, data, keys, passphrase, agent):
+    """Substitute+send scoped to ONLY the granted keys. `keys` is the list of
+    secret names this call/lease is permitted to use. Any [name] placeholder in
+    a header or body that is NOT in `keys` is LEFT AS-IS (never substituted),
+    so an agent can't smuggle an ungranted secret into the call. Returns status."""
+    st = load_store()
+    def sub(s):
+        if isinstance(s, str) and "[" in s:
+            out = s
+            for name in keys:                      # ONLY granted names
+                if name in st:
+                    out = out.replace("[" + name + "]", unwrap(name, passphrase))
+            return out
+        return s
+    final_headers = {k: sub(v) for k, v in headers.items()}
+    final_data = data
+    if data and isinstance(data, str) and "[" in data:
+        txt = data
+        for name in keys:
+            if name in st:
+                txt = txt.replace("[" + name + "]", unwrap(name, passphrase))
+        final_data = txt
+    body = final_data.encode() if isinstance(final_data, str) else (final_data or bytes())
+    req = urllib.request.Request(url, data=body or None, headers=final_headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            rbody = resp.read().decode(errors="replace")
+        log_event({"ev":"CALL","agent":agent,"method":method,"url":url,
+                   "keys":keys,"status":resp.status})
+        print("STATUS:", resp.status)
+        print("RESULT:"); print(rbody[:2000])
+        return resp.status
+    except Exception as ex:
+        log_event({"ev":"CALL_FAIL","agent":agent,"method":method,"url":url,
+                   "keys":keys,"why":str(ex)[:120]})
+        print("CALL FAILED:", ex)
+        return None
+
 def cmd_call(argv, passphrase):
-    # call <method> <url> --header "Name:[key_name]" ... [--data <json with [key] placeholders>]
-    # Provider-agnostic: the caller supplies the FULL request; the vault swaps
-    # each [key_name] placeholder for the held secret, sends as-is, returns the
-    # raw response. The vault does NOT know fal vs DO vs any auth shape.
+    # call <method> <url> --header "Name:[key_name]" ... [--data <json>]
+    # Provider-agnostic substitute+send, same as the request path but run
+    # MANUALLY by a caller (secrets never leave the vault). Only the keys named
+    # in the header/body placeholders are substituted.
     if len(argv) < 3:
         print("usage: vault.py call <method> <url> [--header 'Name:[key_name]']... [--data <json>]")
         return 1
@@ -678,46 +814,33 @@ def cmd_call(argv, passphrase):
     url = argv[1]
     headers = {}
     data = None
+    keys = []
     i = 2
     while i < len(argv):
         if argv[i] == "--header":
             nv = argv[i+1].split(":", 1)
             headers[nv[0].strip()] = nv[1].strip(" ") if len(nv) > 1 else ""
+            if "[" in headers.get(nv[0].strip(), "") and nv[0] != "":
+                pass
             i += 2
         elif argv[i] == "--data":
-            data = argv[i+1].encode()
-            i += 2
+            data = argv[i+1]; i += 2
         else:
             i += 1
     if method in ("POST", "PUT", "PATCH") and data is None:
-        data = b""
-    if data is None:
-        data = bytes()
-    def sub(s):
-        if isinstance(s, str) and "[" in s:
-            out = s
-            for name in st.keys():
-                out = out.replace("[" + name + "]", unwrap(name, passphrase))
-            return out
-        return s
+        data = ""
     st = load_store()
-    final_headers = {k: sub(v) for k, v in headers.items()}
-    final_data = data
-    if data and b"[" in data:
-        txt = data.decode(errors="replace")
-        for name in st.keys():
-            txt = txt.replace("[" + name + "]", unwrap(name, passphrase))
-        final_data = txt.encode()
-    req = urllib.request.Request(url, data=final_data or None, headers=final_headers, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode(errors="replace")
-        log_event({"ev":"CALL","method":method,"url":url,"status":resp.status})
-        print("STATUS:", resp.status)
-        print("RESULT:"); print(body[:2000])
-    except Exception as ex:
-        log_event({"ev":"CALL_FAIL","method":method,"url":url,"why":str(ex)[:120]})
-        print("CALL FAILED:", ex)
+    # derive required keys from placeholders in header values + body
+    for v in headers.values():
+        if "[" in v:
+            for name in st:
+                if ("[" + name + "]") in v and name not in keys:
+                    keys.append(name)
+    if data and "[" in data:
+        for name in st:
+            if ("[" + name + "]") in data and name not in keys:
+                keys.append(name)
+    _exec_call(method, url, headers, data, keys, passphrase, "--manual")
     return 0
 
 def cmd_recover():
