@@ -125,7 +125,8 @@ cp /Volumes/Secure/private_api_vault/stub_endpoint.py .
 (python3 stub_endpoint.py $PORT >/dev/null 2>&1 &)
 sleep 1
 OUT=$(VAULT_PASS=$PASS python3 vault.py call GET "http://127.0.0.1:$PORT/anything" --header "Authorization: Bearer [fal]" 2>/dev/null)
-echo "$OUT" | grep -q 'Bearer dummy_fal_key_ABC123' && ok "secret substituted into header internally" || bad "substitution into header failed"
+# substitution happened (the [fal] placeholder was swapped) AND the real value is redacted
+echo "$OUT" | grep -q 'Bearer \[REDACTED\]' && ok "secret substituted into header (and redacted on return)" || { echo "$OUT" | grep -qF 'Bearer dummy_fal_key_ABC123' && bad "RAW secret leaked in response!" || bad "substitution into header failed: $OUT"; }
 pkill -f "stub_endpoint.py $PORT" 2>/dev/null
 if grep -q 'ABC123' .vault/keys.json; then bad "key leaked after call"; else ok "key still encrypted after call"; fi
 
@@ -259,10 +260,39 @@ echo "$GB" | grep -qi "REFUSED: bare key name" && ok "bare key name refused by g
 grep -q '"ev": *"CALL_REJECT"' "$LEDGER" && ok "CALL_REJECT logged to ledger" || bad "no CALL_REJECT ledger event"
 }
 
-# ---------- 22. tamper writes to the ledger ----------
+# ---------- 22. response secret hygiene (echo must not leak the key value) ----------
+step "response redacts the secret (no leak on echo)"
+LEDGER="$SCRATCH/.vault/ledger.jsonl"
+# a stub that echoes the request back incl. the Authorization header
+cat >"$SCRATCH/echo_stub.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+class H(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def _echo(self):
+        body = json.dumps({"you_sent": dict(self.headers)}).encode()
+        self.send_response(200); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    do_GET=_echo; do_POST=_echo
+HTTPServer(("127.0.0.1",18184), H).serve_forever()
+PY
+python3 "$SCRATCH/echo_stub.py" >/dev/null 2>&1 &
+ESTUB=$!
+sleep 1
+# readiness: confirm the stub answers before staging, else the call times out (not hangs now)
+curl -s --max-time 2 http://127.0.0.1:18184/anything >/dev/null 2>&1 || { sleep 1; }
+BKL="$BK__KEY"
+LEAKKEY=$(HERMES_HOME="/Users/guymeaker/.hermes/profiles/x_bare" VAULT_AGENT_KEY="$BKL" VAULT_PASS=passV3 python3 vault.py request GET http://127.0.0.1:18184/anything 0 "echo leak test" --keys fal --header "Authorization: Bearer [fal]" 2>&1 | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+[ -n "$LEAKKEY" ] && VAULT_PASS=passV3 python3 vault.py decide "$LEAKKEY" yes >/dev/null 2>&1
+LEAK_RESULT=$(VAULT_PASS=passV3 python3 vault.py resolve "$LEAKKEY" 2>&1)
+echo "$LEAK_RESULT" | grep -q "\[REDACTED\]" && ok "echo body has [REDACTED] (secret masked)" || bad "echo NOT redacted: $LEAK_RESULT"
+echo "$LEAK_RESULT" | grep -q "dummy_fal_key_ABC123" && bad "RAW SECRET leaked in response!" || ok "no raw secret value in agent response"
+kill "$ESTUB" 2>/dev/null
+
+# ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"
-# corrupt the pending file's signature, then try to use it -> fail-closed + ledger event
 LEDGER_BEFORE=$(wc -l < "$LEDGER" 2>/dev/null || echo 0)
 python3 - "$SCRATCH/.vault/pending.json" <<'PY'
 import json,sys

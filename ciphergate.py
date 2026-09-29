@@ -189,6 +189,16 @@ def rekey_passphrase(service, old_pass, new_pass):
     store[service] = e
     save_store(store)
 
+def _verify_passphrase(passphrase):
+    """Attempt to prove the passphrase can decrypt the store. Raises RuntimeError
+    if it can't (used at server startup so a wrong passphrase fails cleanly)."""
+    store = load_store()
+    if not store:
+        return True  # empty store — nothing to decrypt yet, passphrase is untested
+    svc = next(iter(store))          # any stored entry
+    unwrap(svc, passphrase)          # raises RuntimeError if the passphrase is wrong
+    return True
+
 def unwrap(service, passphrase):
     e = load_store()[service]
     salt = base64.b64decode(e["salt"])
@@ -362,12 +372,18 @@ BOT_CHAT_SVC   = "telegram_bot_chat"
 def bot_token(passphrase):
     if BOT_TOKEN_SVC not in load_store():
         return ""
-    return unwrap(BOT_TOKEN_SVC, passphrase)
+    try:
+        return unwrap(BOT_TOKEN_SVC, passphrase)
+    except Exception:
+        return ""   # wrong passphrase / bad decrypt -> treated as unconfigured, not a crash
 
 def bot_chat(passphrase):
     if BOT_CHAT_SVC not in load_store():
         return ""
-    return unwrap(BOT_CHAT_SVC, passphrase)
+    try:
+        return unwrap(BOT_CHAT_SVC, passphrase)
+    except Exception:
+        return ""   # wrong passphrase / bad decrypt -> treated as unconfigured, not a crash
 
 def _mask(s):
     if not s: return "(not set)"
@@ -655,6 +671,13 @@ def cmd_request(argv, passphrase):
     flag_txt = f"  [FLAGGED: {detail} - Batman, look before you approve]" if flagged else ""
     key_txt = f"  keys: [{','.join(keys)}]" if keys else ""
     print(f"{agent}: no lease. Staged request key {req_key}.{key_txt} Handed to Batman to approve.{flag_txt}")
+    # push the inline YES/NO/OTHER button to Batman on Telegram (real approval, no typing)
+    try:
+        ok = tg_approval_button(passphrase, req_key, agent, http, keys, reason)
+        print("Telegram approval button " + ("sent." if ok else "NOT sent (check `bot info`)."))
+    except Exception as ex:
+        log_event({"ev":"TG_SEND_ERR","req_key":req_key,"why":str(ex)[:120]})
+        print("Telegram approval send failed:", ex)
     print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
     return 0
 
@@ -680,6 +703,12 @@ def cmd_decide(argv, passphrase):
     msg = " ".join(argv[2:])
     if verdict not in ("yes", "no", "other"):
         print("verdict must be yes|no|other"); return 1
+    return _apply_verdict(passphrase, req_key, verdict, msg)
+
+def _apply_verdict(passphrase, req_key, verdict, msg=""):
+    """Shared: write Batman's YES/NO/OTHER verdict into a pending entry. Used by
+    the CLI `decide` command AND the Telegram inline-button poller, so both
+    paths write the SAME signed state. Returns 0 on success, else exit code."""
     pending, st = load_pending(passphrase)
     if st != "ok":
         log_event({"ev":"TAMPER","file":"pending","cmd":"decide","outcome":"FAIL_CLOSED"})
@@ -692,7 +721,8 @@ def cmd_decide(argv, passphrase):
     e["msg"] = msg
     e["answered_at"] = now_iso()
     save_pending(pending, passphrase)
-    log_event({"ev":"VERDICT","req_key":req_key,"agent":e["agent"],"verdict":verdict,"by":"batman-stub","msg":msg})
+    log_event({"ev":"VERDICT","req_key":req_key,"agent":e["agent"],"verdict":verdict,
+               "by":"batman-stub:" + verdict, "msg":msg})
     print(f"{req_key}: {e['agent']} -> {verdict.upper()}" + (f" (msg: {msg})" if msg else ""))
     return 0
 
@@ -785,8 +815,24 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     """Substitute+send scoped to ONLY the granted keys. `keys` is the list of
     secret names this call/lease is permitted to use. Any [name] placeholder in
     a header or body that is NOT in `keys` is LEFT AS-IS (never substituted),
-    so an agent can't smuggle an ungranted secret into the call. Returns status."""
+    so an agent can't smuggle an ungranted secret into the call.
+
+    SECRET HYGIENE ON RETURN: the response body is returned to the agent, but a
+    target that ECHOES the request back (test stubs, httpbin) will reflect the
+    real secret we substituted. Before returning, every secret VALUE this call
+    actually substituted is masked to [REDACTED] so it can NEVER leak to the
+    agent in the response."""
     st = load_store()
+    # resolve the real secret values we are permitted to substitute (kept for
+    # the return-mask; never logged, never returned raw)
+    secret_values = [unwrap(name, passphrase) for name in keys if name in st]
+    def _redact(rbody):
+        if not secret_values:
+            return rbody
+        for v in secret_values:
+            if v and v in rbody:
+                rbody = rbody.replace(v, "[REDACTED]")
+        return rbody
     # GUARD: detect a bare (unbracketed) granted key name in a header value or
     # body. If the agent wrote "Bearer FAL_API_KEY" or "FAL_API_KEY" instead of
     # "[FAL_API_KEY]", CipherGate would forward it literally and the call fails
@@ -826,13 +872,13 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     body = final_data.encode() if isinstance(final_data, str) else (final_data or bytes())
     req = urllib.request.Request(url, data=body or None, headers=final_headers, method=method)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=20) as resp:
             rbody = resp.read().decode(errors="replace")
         log_event({"ev":"CALL","agent":agent,"method":method,"url":url,
                    "keys":keys,"status":resp.status})
         print("STATUS:", resp.status)
-        print("RESULT:"); print(rbody[:2000])
-        return {"status": resp.status, "body": rbody}   # return the RESULT so the server can relay it
+        print("RESULT:"); print(_redact(rbody)[:2000])
+        return {"status": resp.status, "body": _redact(rbody)}   # REDACTED so echoes can't leak secrets
     except Exception as ex:
         log_event({"ev":"CALL_FAIL","agent":agent,"method":method,"url":url,
                    "keys":keys,"why":str(ex)[:120]})
@@ -1072,6 +1118,102 @@ def _verify_agent_key(agent, key):
         return False, f"No key registered for {agent}."
     return True, ""
 
+# ---------- Telegram inline approval (real YES/NO/OTHER buttons) ----------
+def tg_post(token, method, payload):
+    """One POST to the Telegram Bot API. Returns parsed JSON or None."""
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except Exception as ex:
+        log_event({"ev":"TG_ERR","method":method,"why":str(ex)[:120]})
+        return None
+
+def tg_send(passphrase, text, buttons=None, parse_mode=None):
+    """Send a Telegram message to Batman. buttons = [[cb,label],...] renders an
+    inline keyboard. No bot configured -> no-op (logs TG_UNCONFIGURED)."""
+    tok = bot_token(passphrase)
+    cid = bot_chat(passphrase)
+    if not tok or not cid:
+        log_event({"ev":"TG_UNCONFIGURED","text":text[:60]})
+        return False
+    payload = {"chat_id": cid, "text": text}
+    if parse_mode: payload["parse_mode"] = parse_mode
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": [
+            [{"text": lbl, "callback_data": cb} for cb, lbl in buttons]]}
+    return bool(tg_post(tok, "sendMessage", payload))
+
+def tg_approval_button(passphrase, req_key, agent, http, keys, reason):
+    """Push the approval ask to Batman with YES/NO/OTHER inline buttons.
+    Sends as PLAIN TEXT (no HTML) so URLs with & ? etc never break parsing."""
+    lines = ["CipherGate — approve this?",
+             "",
+             f"agent : {agent}",
+             f"call  : {http}",
+             f"keys  : {', '.join(keys) or '-'}",
+             f"reason: {reason or '-'}",
+             f"req   : {req_key}"]
+    return tg_send(passphrase, "\n".join(lines), buttons=[
+        (f"c:{req_key}:yes", "YES"),
+        (f"c:{req_key}:no", "NO"),
+        (f"c:{req_key}:other", "OTHER"),
+    ], parse_mode=None)
+
+def tg_poll_loop(passphrase, stop_event):
+    """Background thread: long-poll Telegram getUpdates; on an inline-button
+    callback (c:<req_key>:<yes|no|other>) from Batman, apply the verdict via the
+    SAME shared path as `decide`. Runs until stop_event is set."""
+    import time as _time
+    offset = 0
+    idle = 2
+    while not stop_event.is_set():
+        tok = bot_token(passphrase)
+        cid = bot_chat(passphrase)
+        if not tok or not cid:
+            _time.sleep(idle); idle = min(idle + 2, 10); continue
+        up = tg_post(tok, "getUpdates",
+                     {"timeout": 15, "offset": offset, "allowed_updates": ["callback_query"]})
+        if up is None:
+            _time.sleep(idle); continue
+        idle = 2
+        for u in up.get("result", []):
+            offset = u["update_id"] + 1
+            cq = u.get("callback_query")
+            if not cq: continue
+            sender_id = str(cq.get("from", {}).get("id", ""))
+            if sender_id != str(cid):
+                log_event({"ev":"TG_FORGED","sender":sender_id,"outcome":"REFUSE"})
+                continue
+            data = cq.get("data", "")
+            if not data.startswith("c:"): continue
+            parts = data.split(":")
+            if len(parts) < 3: continue
+            req_key, verdict = parts[1], parts[2]
+            if verdict not in ("yes", "no", "other"): continue
+            rc = _apply_verdict(passphrase, req_key, verdict)
+            # CONFIRM visibly: answer the callback (clears the glow) AND edit the
+            # original button message to show the decision, so Batman sees a real
+            # confirmation — not just a transient toast.
+            if rc == 0:
+                decision = {"yes": "✅ APPROVED", "no": "❌ DENIED", "other": "↩️ OTHER"}[verdict]
+            else:
+                decision = f"⚠️ error recording ({rc})"
+            cb_msg = cq.get("message", {})
+            msg_id = cb_msg.get("message_id")
+            chat_id = cb_msg.get("chat", {}).get("id") or cid
+            tg_post(tok, "answerCallbackQuery",
+                    {"callback_query_id": cq["id"], "text": decision})
+            if msg_id:
+                # replace the button message with a plain confirmation line (no buttons)
+                tg_post(tok, "editMessageText", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "text": f"{decision}\nreq {req_key}\n({cq['data'].split(':')[1]})",
+                    "reply_markup": {"inline_keyboard": []}})  # empty = remove buttons
+
 def cmd_run(argv, passphrase):
     """ciphergate run [--port N]  — CipherGate as a LOCAL SERVER for agents.
 
@@ -1092,6 +1234,15 @@ def cmd_run(argv, passphrase):
     port = 18200
     if argv and argv[0] == "--port" and len(argv) > 1:
         port = int(argv[1])
+
+    # Verify the passphrase is right BEFORE starting the server: a wrong one would
+    # make every later decrypt fail. Clean message + exit, no traceback.
+    try:
+        _verify_passphrase(passphrase)
+    except RuntimeError as ex:
+        print("WRONG PASSPHRASE — the process could not unlock the vault. "
+              "Start again with the correct passphrase.")
+        return 1
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a): pass
@@ -1210,10 +1361,16 @@ def cmd_run(argv, passphrase):
     srv = http.server.HTTPServer(("127.0.0.1", port), H)
     print(f"CipherGate server up on http://127.0.0.1:{port} (passphrase held once; Ctrl-C to stop).")
     print(f"Agents POST /request and /resolve with their agent name + .env key.")
+    stop = threading.Event()
+    poll_t = threading.Thread(target=tg_poll_loop, args=(passphrase, stop), daemon=True)
+    poll_t.start()
+    print("Telegram inline-YES/NO poller started." if (bot_token(passphrase) and bot_chat(passphrase))
+          else "No Telegram bot configured — approvals via `ciphergate decide <key> yes|no`. Configure with `ciphergate bot set`.")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    stop.set()
     return 0
 
 def _restore_env(old):
@@ -1255,7 +1412,14 @@ def main():
     }
     fn = table.get(c)
     if not fn: print("unknown cmd"); return 1
-    return fn()
+    r = fn()
+    # some commands (resolve) return a dict to the SERVER so it can relay the
+    # call result. For CLI use, treat a dict as success and print it; only ints
+    # are exit codes.
+    if isinstance(r, dict):
+        print(r)
+        return 0
+    return r
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
