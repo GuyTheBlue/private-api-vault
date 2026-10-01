@@ -46,6 +46,27 @@ them. If a file is hand-edited or tampered with, CipherGate sees the signature
 no longer matches, refuses to trust the file, and logs a TAMPER event to the
 ledger so it is never silent.
 
+== THE REQUEST KEY — what it is for (important to know) ==
+A request key is ONLY needed in ONE situation: Batman has not answered within
+the wait window, so the vault sends a "come back later" (timeout) reply. In that
+one case you keep the key and use it to check back for the verdict.
+In every other case the request key is not something you act on:
+  - approved  -> the result comes straight back in your call; the key in the
+                reply is informational only, the request is already DONE.
+  - denied    -> no key at all; the request is refused and finished.
+Rule: approved or denied = the request is resolved (finished). Only a timeout
+leaves it open, and only then does the key matter.
+
+== `request` vs `call` — the difference ==
+  ciphergate request   is the GATED path: goes through identity check, the
+  sensitivity gate, the lease check, and (if no live lease) asks Batman for
+  approval on Telegram. This is what a real agent uses to make a call from
+  inside the vault's rules. Returns the result.
+  ciphergate call      is the UNGATED, manual helper: it does the substitution
+  and sends immediately, with NO identity check, NO lease, NO Batman approval.
+  It exists ONLY for quick manual tests and the regression suite - you would
+  NOT use it for a real agent request, because it skips every gate.
+
 == HOW TO USE IT (all from a terminal) ==
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
@@ -55,10 +76,10 @@ ledger so it is never silent.
   ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>]
                                                  ask the gate to make a call for an agent
   ciphergate pending                             show requests waiting for approval (or `pending clear` to wipe the wait list)
-  ciphergate decide  <req_key> <yes|no|other> [msg]   approve/refuse a pending request
-  ciphergate resolve <req_key>                   agent picks up the verdict / result
+  ciphergate decide  <req_key> <yes|no|other> [msg]   approve/refuse a pending request (terminal alternative to the Telegram buttons)
+  ciphergate resolve <req_key>                   [TEST/REGRESSION only] agent picks up a verdict - you normally will not use this
   ciphergate lease                               show active leases (standing grants)
-  ciphergate call <method> <url> [--header "N:[key]"] [--data <json>]   manual substitute+send
+  ciphergate call <method> <url> [--header "N:[key]"] [--data <json>]   [TEST/REGRESSION only] manual substitute+send, skips all gates
   ciphergate ledger                              read the full audit history
   ciphergate recover                             set a new passphrase using the off-site recovery key
   ciphergate update                              change the passphrase (needs the current one)
