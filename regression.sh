@@ -96,6 +96,14 @@ echo "$R8" | grep -qi "Lease" && ok "YES resolve grants lease for [fal]" || bad 
 LV=$(VAULT_PASS=$PASS python3 vault.py lease)
 echo "$LV" | grep -q "fal" && echo "$LV" | grep -q oracle && ok "key-scoped lease created (oracle+fal)" || bad "key-scoped lease not created"
 
+# ---------- 8b. lease-covered REPEAT request short-circuits (does not re-ask Batman) ----------
+step "repeat request under live lease short-circuits"
+L2=$(as_agent oracle GET https://api.fal.ai/render 5 "second call" --keys fal)
+echo "$L2" | grep -qi "ACTIVE LEASE covers" && ok "repeat call short-circuits on live lease (no re-ask)" \
+  || bad "repeat call did NOT short-circuit: $L2"
+echo "$L2" | grep -qi "request key" && bad "short-circuited call wrongly staged a new ask" \
+  || ok "short-circuited call did not stage a new pending"
+
 # ---------- 9. decide OTHER -> resolve denies + verbatim message ----------
 step "verdict OTHER denies + verbatim"
 K2=$(as_agent x_other GET https://api.vast.ai 10 "grab box" | grep -o 'request key [a-f0-9]*' | awk '{print $3}')

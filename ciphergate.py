@@ -743,8 +743,8 @@ def cmd_request(argv, passphrase):
             log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE",
                        "keys":keys,"expires":lease.get("expires_iso")})
             print(f"ACTIVE LEASE covers {agent} for [{','.join(keys)}] (expires {lease['expires_iso']}).")
-            _exec_call(method, http, headers, data, keys, passphrase, agent)
-            return 0
+            res = _exec_call(method, http, headers, data, keys, passphrase, agent)
+            return res if isinstance(res, dict) else 0   # return the RESULT so the server can relay it
 
     # No lease -> stage a PENDING entry with a UNIQUE key, ask Batman.
     req_key = secrets.token_hex(8)
@@ -1450,6 +1450,14 @@ def cmd_run(argv, passphrase):
                     rc = cmd_request(args, passphrase)
                 finally:
                     _restore_env(old)
+                if isinstance(rc, dict):
+                    # LEASE path already ran the call -> relay the RESULT now, no wait.
+                    self._reply(rc.get("status") is not None and 200 or 502,
+                                {"ok": rc.get("status") is not None,
+                                 "outcome": "approved" if rc.get("status") is not None else "call_failed",
+                                 "call_status": rc.get("status"),
+                                 "result": rc.get("body")})
+                    return
                 if rc != 0:
                     self._reply(403, {"ok":False,"note":"denied before staging"})
                     return
