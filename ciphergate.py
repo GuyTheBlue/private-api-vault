@@ -848,14 +848,22 @@ def cmd_resolve(argv, passphrase):
     # variable-wait timeout: if still pending and past the window, tell agent to wait.
     if e["status"] == "pending":
         age_min = (now_epoch() - e["asked_epoch"]) / 60
+        retries = e.get("retries", 0)
+        # incremental backoff: each failed check-back waits longer (base * 2^retries, capped at 10 min)
+        backoff = min(WAIT_MIN * (2 ** retries), 10) if WAIT_MIN > 0 else 0
         if age_min < WAIT_MIN:
             still = e["asked_epoch"] + WAIT_MIN * 60 - now_epoch()
             print(f"Still waiting on Batman. Come back in ~{int(still//60)}m (or {WAIT_MIN}min window); key {req_key} is yours.")
             log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"STILL_PENDING","agent":e["agent"]})
             return 0
-        # past window but no verdict -> re-ask / tell agent to try again later
-        log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"PENDING_TIMEOUT","agent":e["agent"]})
-        print(f"Batman hasn't answered in {WAIT_MIN} min. Not approved. Come back later with key {req_key}.")
+        # past the first window but no verdict -> count this retry, tell the agent
+        # to wait incrementally longer before the NEXT check-back.
+        e["retries"] = retries + 1
+        save_pending(pending, passphrase)
+        log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"PENDING_RETRY","agent":e["agent"],
+                   "retries":retries + 1,"backoff_min":backoff})
+        print(f"Batman hasn't answered in {WAIT_MIN} min. Not approved yet. "
+              f"Wait {backoff} min, then retry with key {req_key} (retry #{retries + 1}).")
         return 0
 
     # verdict decided
@@ -888,12 +896,17 @@ def cmd_resolve(argv, passphrase):
             log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman",
                        "keys":keys,"lease_min":dur,"expires":lease["expires_iso"]})
             print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. Lease {dur} min.")
+            lease_info = {"granted":True,"minutes":dur,"expires":lease["expires_iso"],
+                          "keys":keys}   # token NAMES only, never values
         else:
             log_event({"ev":"GRANT","req_key":req_key,"agent":e2["agent"],"by":"batman",
                        "keys":keys,"lease_min":0,"note":"one-off, no lease"})
             print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. One-off call, no lease.")
+            lease_info = {"granted":False,"minutes":0,"keys":keys}
         res = _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
                    e2.get("data"), keys, passphrase, e2["agent"])
+        if isinstance(res, dict):
+            res["lease"] = lease_info    # tell the agent about the lease (names only)
         return res if isinstance(res, dict) else 0
     if e2["status"] == "no":
         log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
@@ -1499,7 +1512,8 @@ def cmd_run(argv, passphrase):
                     if isinstance(rr, dict):
                         self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved",
                                           "call_status":rr.get("status"),
-                                          "result":rr.get("body")})
+                                          "result":rr.get("body"),
+                                          "lease":rr.get("lease") or {}})
                     else:
                         self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved","rc":rr})
                 elif verdict == "no" or verdict == "other":
@@ -1524,7 +1538,8 @@ def cmd_run(argv, passphrase):
                         self._reply(403, {"ok":False,"outcome":"denied"})
                 else:
                     self._reply(408, {"ok":False,"req_key":req_key,
-                        "outcome":"timeout","note":f"Batman hasn't answered in {WAIT_MIN} min. Reprint with req_key later: {req_key}"})
+                        "outcome":"timeout",
+                        "note":f"Batman hasn't answered yet. Wait then retry with this key: {req_key}"})
             elif self.path == "/resolve":
                 agent = p.get("agent",""); key = p.get("key","")
                 ok, why = _verify_agent_key(agent, key)

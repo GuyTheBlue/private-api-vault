@@ -123,7 +123,7 @@ echo "$R10" | grep -qi "Denied" && ok "NO resolve denies" || bad "NO resolve wro
 step "pending timeout (window 0)"
 K4=$(as_agent x_timeout GET https://api.x 5 newthing | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
 R11=$(VAULT_PASS=$PASS python3 vault.py resolve "$K4")
-echo "$R11" | grep -qi "come back later" && ok "pending past window tells agent to come back" || bad "timeout wrong: $R11"
+echo "$R11" | grep -qi "retry with key" && ok "pending past window tells agent to wait then retry with the key" || bad "timeout wrong: $R11"
 
 # ---------- 12. no plaintext anywhere ----------
 step "no plaintext leak"
