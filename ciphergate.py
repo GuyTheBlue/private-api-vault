@@ -54,7 +54,7 @@ ledger so it is never silent.
   ciphergate access list|add|remove               manage which profiles are allowed
   ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>]
                                                  ask the gate to make a call for an agent
-  ciphergate pending                             show requests waiting for Batman's approval
+  ciphergate pending                             show requests waiting for approval (or `pending clear` to wipe the wait list)
   ciphergate decide  <req_key> <yes|no|other> [msg]   approve/refuse a pending request
   ciphergate resolve <req_key>                   agent picks up the verdict / result
   ciphergate lease                               show active leases (standing grants)
@@ -695,12 +695,21 @@ def cmd_request(argv, passphrase):
     print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
     return 0
 
-def cmd_pending(passphrase):
+def cmd_pending(argv, passphrase):
     pending, st = load_pending(passphrase)
     if st != "ok":
         log_event({"ev":"TAMPER","file":"pending","cmd":"pending","outcome":"FAIL_CLOSED"})
         print("TAMPER DETECTED: pending index unverifiable.")
         return 4
+    if argv and argv[0].lower() == "clear":
+        n = len(pending)
+        save_pending({}, passphrase)
+        log_event({"ev":"PENDING_CLEAR","by":"batman","cleared":n})
+        print(f"Cleared {n} pending request(s).\n"
+              f"(This only removes the waiting list. If you also saw those requests "
+              f"go out as Telegram approvals, that's expected - they were asked and "
+              f"never answered; clearing just tidies the store.)")
+        return 0
     if not pending: print("(no pending requests)"); return 0
     now = now_epoch()
     for k, e in sorted(pending.items()):
@@ -1088,23 +1097,6 @@ def _banner():
         print()
         print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
 
-def _cmd_table(passphrase):
-    return {
-        "add": lambda a: cmd_add(a, passphrase),
-        "keygen": lambda a: cmd_keygen(a, passphrase),
-        "access": lambda a: cmd_access(a, passphrase),
-        "request": lambda a: cmd_request(a, passphrase),
-        "pending": lambda: cmd_pending(passphrase),
-        "decide": lambda a: cmd_decide(a, passphrase),
-        "resolve": lambda a: cmd_resolve(a, passphrase),
-        "lease": lambda: cmd_lease(passphrase),
-        "call": lambda a: cmd_call(a, passphrase),
-        "update": lambda: cmd_update(passphrase),
-        "status": lambda: cmd_status(passphrase),
-        "bot": lambda a: cmd_bot(a, passphrase),
-        "ledger": lambda: cmd_ledger(),
-    }
-
 def _split(line):
     import shlex
     try:
@@ -1466,7 +1458,7 @@ def main():
         "keygen": lambda: cmd_keygen(args, passphrase),
         "access": lambda: cmd_access(args, passphrase),
         "request": lambda: cmd_request(args, passphrase),
-        "pending": lambda: cmd_pending(passphrase),
+        "pending": lambda: cmd_pending(args, passphrase),
         "decide": lambda: cmd_decide(args, passphrase),
         "resolve": lambda: cmd_resolve(args, passphrase),
         "lease": lambda: cmd_lease(passphrase),

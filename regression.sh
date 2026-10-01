@@ -31,7 +31,7 @@ export VAULT_REC=$REC
 
 # ---------- 2. mint keys for the profiles later tests use ----------
 step "mint .env keys"
-for p in link oracle x_other x_no x_timeout evil x_bare; do mint "$p"; done
+for p in link oracle x_other x_no x_timeout evil x_bare x_clear; do mint "$p"; done
 ok "keys minted for all tested profiles"
 
 # fake API key in the store so key-scoped lease tests have something to lease
@@ -75,6 +75,15 @@ K1=$(as_agent oracle GET https://api.fal.ai/render 5 "render pic" | grep -o 'req
 [ -n "$K1" ] && ok "request staged ($K1)" || bad "no request key"
 PV=$(VAULT_PASS=$PASS python3 vault.py pending)
 echo "$PV" | grep -q "$K1" && ok "pending shows staged entry" || bad "pending entry missing"
+
+# ---------- 7b. pending clear wipes the waiting list ----------
+step "pending clear wipes the wait list"
+KC=$(as_agent x_clear GET https://api.x 5 clear-me | grep -o 'request key [a-f0-9]*' | awk '{print $3}')
+[ -n "$KC" ] && ok "staged request for clearing ($KC)" || bad "no key to clear"
+CLR=$(VAULT_PASS=$PASS python3 vault.py pending clear)
+echo "$CLR" | grep -qi "Cleared" && ok "pending clear reports cleared" || bad "pending clear failed: $CLR"
+AFTER=$(VAULT_PASS=$PASS python3 vault.py pending)
+echo "$AFTER" | grep -q "$KC" && bad "cleared entry still shows" || ok "pending empty after clear"
 
 # ---------- 8. decide + resolve YES -> key-scoped lease or one-off call ----------
 step "verdict YES grants lease on requested key"
