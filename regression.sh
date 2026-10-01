@@ -256,6 +256,26 @@ ACCT_AFTER=$(VAULT_PASS=passV3 python3 vault.py access list 2>&1 | grep -c link)
 OLDDEAD=$(VAULT_PASS=$PASS python3 vault.py lease 2>&1)
 echo "$OLDDEAD" | grep -qi "rejected\|TAMPER" && ok "old passphrase dead after recovery" || bad "old pass still accepted"
 
+# ---------- 20b. rotate-recovery-key: old dies, new works, secrets untouched ----------
+step "rotate-recovery-key retires the old recovery key"
+ROT=$(VAULT_PASS=passV3 python3 vault.py rotate-recovery-key 2>&1 <<EOF
+$REC
+unused_probe
+EOF
+)
+NEWREC=$(echo "$ROT" | grep -A1 'NEW RECOVERY KEY' | tail -1 | tr -d '[:space:]')
+[ -n "$NEWREC" ] && ok "rotate-recovery-key minted a new key" || bad "rotate failed: $ROT"
+echo "$ROT" | grep -q "secrets untouched" && ok "rotation left secrets re-wrapped not re-entered" || bad "rotation wording wrong: $ROT"
+# the OLD recovery key must now be dead
+OLDDEAD2=$(VAULT_NEW_PASS=passV4 VAULT_REC="$REC" python3 vault.py recover 2>&1 | head -1)
+echo "$OLDDEAD2" | grep -qi "rejected" && ok "OLD recovery key rejected after rotate" || bad "OLD rec key still worked: $OLDDEAD2"
+# the NEW recovery key must still fully recover
+NEWOK=$(VAULT_NEW_PASS=passV5 VAULT_REC="$NEWREC" python3 vault.py recover 2>&1 | head -1)
+echo "$NEWOK" | grep -qi "Recovered" && ok "NEW recovery key still recovers the store" || bad "NEW rec key failed: $NEWOK"
+# restore the vault back to passV3 so the downstream passV3 tests keep working
+RESTORE=$(VAULT_NEW_PASS=passV3 VAULT_REC="$NEWREC" python3 vault.py recover 2>&1 | head -1)
+echo "$RESTORE" | grep -qi "Recovered" && ok "restored vault to passV3 after rotate test" || bad "restore to passV3 failed: $RESTORE"
+
 # ---------- 21. bare key name guard ----------
 step "bare key name is refused + CALL_REJECT logged"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"

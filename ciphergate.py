@@ -82,6 +82,7 @@ leaves it open, and only then does the key matter.
   ciphergate call <method> <url> [--header "N:[key]"] [--data <json>]   [TEST/REGRESSION only] manual substitute+send, skips all gates
   ciphergate ledger                              read the full audit history
   ciphergate recover                             set a new passphrase using the off-site recovery key
+  ciphergate rotate-recovery-key                 retire the OLD recovery key for a brand-new one (use if a key is compromised)
   ciphergate update                              change the passphrase (needs the current one)
   ciphergate status                              where the store lives + how many keys
   ciphergate run --port 18200                    start the local server agents call over HTTP
@@ -96,6 +97,50 @@ leaves it open, and only then does the key matter.
   yours to keep somewhere safe and separate (a password manager, a printed
   copy). If you lose both the passphrase and this key, the vault cannot be
   unlocked again - that is by design.
+
+== HOW YOUR VAULT STOWS AND SECURES YOUR DATA ==
+(explanation + diagram: see images/2 secrets_vault.jpg)
+
+To keep your information completely private, our system uses a two-step lock
+system - similar to a high-security bank vault.
+
+1. The Core Secret Lockbox
+When you save secrets in the system, the program creates a unique, one-time
+Data Key.
+  - The system uses this Data Key to lock your secrets inside a digital lockbox.
+  - Your actual secrets are completely scrambled and unreadable without this
+    specific key.
+
+2. The Two Protective Envelopes
+To keep that Data Key safe, the system makes a copy of it and seals it inside
+two separate, highly secure envelopes. You only need to open one of these
+envelopes to get your secrets back.
+  - Envelope 1 (The Passphrase Envelope): this envelope can only be opened when
+    you type in your Original Passphrase (the main password you created when
+    you set up your account).
+  - Envelope 2 (The Recovery Envelope): this envelope can only be opened using
+    your Recovery Key (your emergency backup code).
+
+HOW YOU OPEN YOUR VAULT
+Because of this design, the system itself never knows or stores your actual
+master password. Instead, when you want to look at your data, the program
+decrypts it using one of two independent pathways:
+  - Normal Access:       You enter your Passphrase. It opens Envelope 1, grabs
+                         the Data Key, and unlocks your secrets.
+  - Emergency Recovery:  You enter your Recovery Key. It bypasses the password
+                         entirely, opens Envelope 2, grabs the Data Key, and
+                         unlocks your secrets.
+
+WHY THIS MATTERS TO YOU
+  - If you lose your password: you will not lose your data. As long as you
+    have your Recovery Key, you can open the second envelope and safely get
+    back inside.
+  - If you change your password: the system does not need to re-lock all your
+    files. It simply destroys the old Envelope 1 and creates a brand-new one
+    with your new password. Your data stays safe and untouched throughout.
+  - Copying the vault folder and setting a NEW passphrase will NOT unlock it:
+    the secrets are locked to the ORIGINAL passphrase and recovery key. The
+    only two keys that can open the vault are the two from the original setup.
 """
 import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time
 
@@ -220,6 +265,22 @@ def rekey_passphrase(service, old_pass, new_pass):
     e["dk_pass"] = base64.b64encode(dk_pass_new).decode()
     e["iv2"] = iv2_new
     e["note"] = (e.get("note", "") + " rekeyed " + now_iso()).strip()
+    store = load_store()
+    store[service] = e
+    save_store(store)
+
+def rekey_recovery_key(service, old_rec, new_rec):
+    """Change ONLY the recovery-key layer of a key. Recovers the data key via
+    the OLD recovery key, then re-wraps dk_rec with the NEW recovery key.
+    The secret (ct), data key, passphrase envelope, and iv1 stay IDENTICAL, so
+    this never touches the actual secrets and the passphrase still works."""
+    e = load_store()[service]
+    dk = aes_crypt(old_rec, e["iv3"], base64.b64decode(e["dk_rec"]), decrypt=True).hex()
+    iv3_new = os.urandom(16).hex()
+    dk_rec_new = aes_crypt(new_rec, iv3_new, bytes.fromhex(dk))
+    e["dk_rec"] = base64.b64encode(dk_rec_new).decode()
+    e["iv3"] = iv3_new
+    e["note"] = (e.get("note", "") + " rec-rekey " + now_iso()).strip()
     store = load_store()
     store[service] = e
     save_store(store)
@@ -1034,6 +1095,44 @@ def cmd_update(passphrase):
     print("The OLD passphrase no longer works; the recovery key still does.")
     return 0
 
+def cmd_rotate_recovery_key(passphrase):
+    """rotate-recovery-key  — retire a (possibly compromised) recovery key.
+    Needs the vault passphrase (to prove it's Batman) + the OLD recovery key
+    (to prove possession) + a NEW one (generated fresh). Re-wraps ONLY the
+    recovery escrow on every key — the secrets and the passphrase envelope are
+    untouched, so no secret is re-entered. The new key is printed once; keep it
+    off-site and destroy the old copy."""
+    if not os.path.exists(KF):
+        print("No store. Run `init` first."); return 1
+    store = load_store()
+    if not store:
+        print("The store is empty - nothing to rotate."); return 1
+    # prove the passphrase is correct (same gate as `update`)
+    try:
+        first = next(iter(store))
+        unwrap(first, passphrase)
+    except Exception:
+        print("Passphrase rejected. Start again with the correct vault passphrase.")
+        return 1
+    old_rk = ask("VAULT_REC", "OLD recovery key (the one being retired): ").strip()
+    try:
+        # prove the OLD recovery key currently unlocks a real entry
+        unwrap_rec(next(iter(store)), old_rk)
+    except Exception:
+        print("OLD recovery key rejected - it does not unlock the store. Nothing changed.")
+        return 1
+    new_rk = new_rec_key()   # fresh 64-hex key, printed once
+    if not valid_rec_key(new_rk):
+        print("Could not mint a new recovery key. Nothing changed.")
+        return 1
+    for s in list(store.keys()):
+        rekey_recovery_key(s, old_rk, new_rk)
+    log_event({"ev":"ROTATE_RECOVERY_KEY","by":"batman","keys":len(store)})
+    print(f"Recovery key rotated. {len(store)} key(s) re-wrapped (secrets untouched).")
+    print(f"NEW RECOVERY KEY - keep this OFF-SITE (shown once):\n{new_rk}")
+    print("The OLD recovery key no longer works. Destroy any saved copy of it.")
+    return 0
+
 def cmd_status(passphrase):
     st = load_store()
     keys, ast = load_access(passphrase)
@@ -1486,6 +1585,7 @@ def main():
         "call": lambda: cmd_call(args, passphrase),
         "recover": lambda: cmd_recover(),
         "update": lambda: cmd_update(passphrase),
+        "rotate-recovery-key": lambda: cmd_rotate_recovery_key(passphrase),
         "status": lambda: cmd_status(passphrase),
         "bot": lambda: cmd_bot(args, passphrase),
         "ledger": lambda: cmd_ledger(),
