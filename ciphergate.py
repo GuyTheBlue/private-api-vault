@@ -1,66 +1,80 @@
 #!/usr/bin/env python3
 """
-ciphergate.py - the Gsquared Productions API-key vault (terminal).
+ciphergate.py - CipherGate, the Gsquared Productions API-key vault.
 
-WHAT IT IS
-  A single terminal program that HOLDS the API keys ENCRYPTED, keeps a signed
-  ACCESS list (profile -> hash of its .env key), a lease file, a pending
-  index, and a LEDGER, and when allowed decrypts a key INTERNALLY and makes
-  the https call itself, returning only the RESULT. A key is never handed to
-  an agent, never written mid-session, never shown, never returned.
+== WHAT THIS IS, IN PLAIN ENGLISH ==
+CipherGate is a vault that keeps your API keys (like the fal.ai token or the
+DigitalOcean token) SAFE. It holds them ENCRYPTED, so they are never stored in
+plain text. When an agent (a Hermes profile like spielberg or link) needs to
+call a service, it does NOT get the key. Instead CipherGate makes the call
+ITSELF, using the key from its own encrypted store, and hands back only the
+result. The key is never shown to the agent, never written to its files,
+never sent in chat, and never printed.
 
-WHO IS KNOCKING (the gate)
-  The vault decides identity purely from the HOME env (HERMES_HOME -> which
-  profile is running) plus the .env key that profile presents. Batman puts a
-  key in each profile's .env and registers its hash in the access list. A
-  profile without a key (robin) simply owns nothing in the list and can't
-  pass; one that flashes someone else's key is caught (running profile !=
-  key owner) -> ACCESS SNEAK, denied + logged. No deny list needed.
+== WHO IS ALLOWED TO ASK (the gate) ==
+CipherGate decides who is knocking by looking at two things together:
+  1. HERMES_HOME (which profile is running, e.g. spielberg), and
+  2. the secret .env key that profile presents (set up once by Batman).
+Every profile that is allowed has its own .env key, and CipherGate stores only
+a scrambled fingerprint of it (its hash), never the key itself. A profile with
+no key (like robin) can't pass. If one profile tries to use ANOTHER profile's
+key, CipherGate spots the mismatch and refuses, logging it. No deny-list needed.
 
-THE DECISION
-  A request decides like this:
-    1. WHO: running profile must present a key registered to it, else DENIED.
-    2. active unexpired lease for agent -> make the call (Batman NOT asked).
-    3. otherwise -> write a PENDING entry with a UNIQUE request key, log it,
-       and ask Batman. When the agent returns with the key, the vault
-       resolves it: pending -> come back later; YES -> lease + call; NO or
-       other -> deny (other passes Batman's message verbatim).
-  There is NO pass-through / "go as usual".
+== HOW AN APPROVAL HAPPENS (the flow) ==
+When an agent asks for a call, CipherGate decides like this:
+  1. WHO: the running profile must show a key registered to it, else DENIED.
+  2. If there is a still-valid lease (a standing grant) for this agent and the
+     exact key names, the call goes ahead WITHOUT asking Batman.
+  3. Otherwise CipherGate stages the request (a pending entry with a unique
+     request key), logs it, and asks Batman to approve.
+Batman approves from Telegram with the inline YES / NO / OTHER buttons:
+     YES   -> the call happens now (and a lease is granted if one was asked).
+     NO    -> the agent is refused.
+     OTHER -> the agent is refused AND gets a message from Batman
+             (the reason, typed into Telegram, comes back to the agent verbatim).
+There is no "pass-through" — no request ever skips the gate.
 
-STAGE-2 TELEGRAM STUB (for now)
-  Real Telegram buttons come in Stage 5. Today `decide <key> yes|no|other
-  [msg]` stands in for Batman's answer so the index/lookup logic can be
-  tested instantly. Wait window is variable via env VAULT_WAIT_MIN.
+== TELEGRAM APPROVAL ==
+CipherGate pushes the approval ask to Batman's Telegram with real buttons.
+You tap, the vault acts. (The older `decide <key> yes|no|other [msg]` command
+still works for the same purpose from the terminal.)
 
-TAMPER-EVIDENCE
-  access/lease/pending JSON carry an HMAC keyed to the vault PASSphrase.
-  Agents don't hold the passphrase, so a direct edit or delete FAILS CLOSED.
-  True process isolation is Stage 4.
+== TAMPER-PROOFING ==
+The state files (access / lease / pending) carry a secret signature (HMAC)
+keyed to the vault passphrase. Only someone with the passphrase can write/alter
+them. If a file is hand-edited or tampered with, CipherGate sees the signature
+no longer matches, refuses to trust the file, and logs a TAMPER event to the
+ledger so it is never silent.
 
-USAGE (all terminal)
-  python3 ciphergate.py init                            first run: set passphrase, mint recovery key
-  python3 ciphergate.py add    <service>                add/update an encrypted key
-  python3 ciphergate.py list                             names only, never values
-  python3 ciphergate.py keygen <profile>                mint a .env key for a profile (shown once)
-  python3 ciphergate.py access list|add|remove          manage .env-key map (passphrase)
-  python3 ciphergate.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[key]'] [--data <json>]   run the decision gate (identity from env)
-  python3 ciphergate.py pending                         show pending requests (passphrase)
-  python3 ciphergate.py decide  <req_key> <yes|no|other> [msg]   TELEGRAM STUB: set verdict
-  python3 ciphergate.py resolve <req_key>               agent returns: pick up the verdict
-  python3 ciphergate.py lease                           active leases (passphrase)
-  python3 ciphergate.py call <method> <url> [--header "Name:[key_name]"] [--data <json>]  substitute+send (manual)
-  python3 ciphergate.py ledger                          audit history (read-only)
-  python3 ciphergate.py recover                         new passphrase via off-site recovery key
-  python3 ciphergate.py update                          change the passphrase (needs current pass)
-  python3 ciphergate.py status                          where things live + counts
+== HOW TO USE IT (all from a terminal) ==
+  ciphergate init                                 first run: set a passphrase, get your off-site recovery key
+  ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
+  ciphergate list                                  show key NAMES only (never values) - no passphrase needed
+  ciphergate keygen <profile>                     mint a .env key for a profile (shown once)
+  ciphergate access list|add|remove               manage which profiles are allowed
+  ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>]
+                                                 ask the gate to make a call for an agent
+  ciphergate pending                             show requests waiting for Batman's approval
+  ciphergate decide  <req_key> <yes|no|other> [msg]   approve/refuse a pending request
+  ciphergate resolve <req_key>                   agent picks up the verdict / result
+  ciphergate lease                               show active leases (standing grants)
+  ciphergate call <method> <url> [--header "N:[key]"] [--data <json>]   manual substitute+send
+  ciphergate ledger                              read the full audit history
+  ciphergate recover                             set a new passphrase using the off-site recovery key
+  ciphergate update                              change the passphrase (needs the current one)
+  ciphergate status                              where the store lives + how many keys
+  ciphergate run --port 18200                    start the local server agents call over HTTP
 
-DIRECTORY (all .vault/ gitignored)
+== WHERE FILES LIVE (all inside .vault/, kept out of git) ==
   .vault/keys.json       the encrypted key store
-  .vault/access.json     profile -> key-hash map (signed, passphrase-keyed)
-  .vault/leases.json     ACTIVE grants only, signed, purged on expiry
-  .vault/pending.json    staged requests by unique key, signed
-  .vault/ledger.jsonl    append-only history
-  vault_recovery.key     NOT stored here - printed once at init, kept OFF-SITE.
+  .vault/access.json     who is allowed (profile -> key fingerprint), signed
+  .vault/leases.json     currently active grants only, signed, auto-expire
+  .vault/pending.json    requests waiting for approval, signed
+  .vault/ledger.jsonl    the append-only history log
+  The recovery key is NOT stored here - it is printed ONCE at init and is
+  yours to keep somewhere safe and separate (a password manager, a printed
+  copy). If you lose both the passphrase and this key, the vault cannot be
+  unlocked again - that is by design.
 """
 import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time
 
@@ -1166,22 +1180,50 @@ def tg_approval_button(passphrase, req_key, agent, http, keys, reason):
 def tg_poll_loop(passphrase, stop_event):
     """Background thread: long-poll Telegram getUpdates; on an inline-button
     callback (c:<req_key>:<yes|no|other>) from Batman, apply the verdict via the
-    SAME shared path as `decide`. Runs until stop_event is set."""
+    SAME shared path as `decide`. Runs until stop_event is set.
+
+    OTHER is a two-step: the button tap alone cannot carry a typed reason. On an
+    OTHER tap the vault asks Batman to type the reason, then the NEXT text
+    message from him is captured as the `msg` and applied (agent sees
+    "Batman says: <reason>")."""
     import time as _time
     offset = 0
     idle = 2
+    awaiting_other = {}   # req_key -> the original callback message_id (for prompt edit)
     while not stop_event.is_set():
         tok = bot_token(passphrase)
         cid = bot_chat(passphrase)
         if not tok or not cid:
             _time.sleep(idle); idle = min(idle + 2, 10); continue
+        # accept BOTH callback_query (button taps) and message (typed text)
         up = tg_post(tok, "getUpdates",
-                     {"timeout": 15, "offset": offset, "allowed_updates": ["callback_query"]})
+                     {"timeout": 15, "offset": offset,
+                      "allowed_updates": ["callback_query", "message"]})
         if up is None:
             _time.sleep(idle); continue
         idle = 2
         for u in up.get("result", []):
             offset = u["update_id"] + 1
+            # --- handle a typed MESSAGE (the OTHER reason) first ---
+            msg = u.get("message")
+            if msg is not None and awaiting_other:
+                sender_id = str(msg.get("from", {}).get("id", ""))
+                if sender_id == str(cid):
+                    req_key, msg_id = next(iter(awaiting_other.items()))
+                    reason = (msg.get("text") or "").strip()
+                    del awaiting_other[req_key]
+                    reason_txt = reason or "no reason given"
+                    rc = _apply_verdict(passphrase, req_key, "other", reason_txt)
+                    if rc == 0:
+                        tg_post(tok, "sendMessage", {
+                            "chat_id": cid,
+                            "text": f"↩️ OTHER recorded — agent told: \"{reason_txt}\""})
+                    else:
+                        tg_post(tok, "sendMessage", {
+                            "chat_id": cid,
+                            "text": f"⚠️ could not record OTHER ({rc}). req {req_key}"})
+                continue
+            # --- handle a button callback (no-arg applies immediate verdict) ---
             cq = u.get("callback_query")
             if not cq: continue
             sender_id = str(cq.get("from", {}).get("id", ""))
@@ -1194,25 +1236,35 @@ def tg_poll_loop(passphrase, stop_event):
             if len(parts) < 3: continue
             req_key, verdict = parts[1], parts[2]
             if verdict not in ("yes", "no", "other"): continue
-            rc = _apply_verdict(passphrase, req_key, verdict)
-            # CONFIRM visibly: answer the callback (clears the glow) AND edit the
-            # original button message to show the decision, so Batman sees a real
-            # confirmation — not just a transient toast.
-            if rc == 0:
-                decision = {"yes": "✅ APPROVED", "no": "❌ DENIED", "other": "↩️ OTHER"}[verdict]
-            else:
-                decision = f"⚠️ error recording ({rc})"
             cb_msg = cq.get("message", {})
             msg_id = cb_msg.get("message_id")
             chat_id = cb_msg.get("chat", {}).get("id") or cid
+            if verdict == "other":
+                # TWO-STEP: don't apply yet — ask Batman to type the reason
+                awaiting_other[req_key] = msg_id
+                tg_post(tok, "answerCallbackQuery",
+                        {"callback_query_id": cq["id"], "text": "type the reason"})
+                if msg_id:
+                    tg_post(tok, "editMessageText", {
+                        "chat_id": chat_id, "message_id": msg_id,
+                        "text": f"↩️ OTHER for req {req_key} — TYPE your reason as the "
+                                f"next message to this bot.\nThe agent will be told: "
+                                f"\"Batman says: <your reason>\".",
+                        "reply_markup": {"inline_keyboard": []}})
+                continue
+            # YES / NO apply immediately
+            rc = _apply_verdict(passphrase, req_key, verdict)
+            if rc == 0:
+                decision = {"yes": "✅ APPROVED", "no": "❌ DENIED"}[verdict]
+            else:
+                decision = f"⚠️ error recording ({rc})"
             tg_post(tok, "answerCallbackQuery",
                     {"callback_query_id": cq["id"], "text": decision})
             if msg_id:
-                # replace the button message with a plain confirmation line (no buttons)
                 tg_post(tok, "editMessageText", {
                     "chat_id": chat_id, "message_id": msg_id,
-                    "text": f"{decision}\nreq {req_key}\n({cq['data'].split(':')[1]})",
-                    "reply_markup": {"inline_keyboard": []}})  # empty = remove buttons
+                    "text": f"{decision}\nreq {req_key}\n{verdict}",
+                    "reply_markup": {"inline_keyboard": []}})
 
 def cmd_run(argv, passphrase):
     """ciphergate run [--port N]  — CipherGate as a LOCAL SERVER for agents.
@@ -1331,13 +1383,25 @@ def cmd_run(argv, passphrase):
                     else:
                         self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved","rc":rr})
                 elif verdict == "no" or verdict == "other":
+                    # capture Batman's OTHER message BEFORE resolve pops the entry
+                    deny_msg = ""
+                    try:
+                        pend_tmp, _st = load_pending(passphrase)
+                        if req_key in pend_tmp:
+                            deny_msg = pend_tmp[req_key].get("msg", "")
+                    except Exception:
+                        pass
                     os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
                     os.environ["VAULT_AGENT_KEY"] = key
                     try:
                         rrc = cmd_resolve([req_key], passphrase)
                     finally:
                         _restore_env(old)
-                    self._reply(403, {"ok":False,"outcome":"denied"})
+                    if verdict == "other":
+                        # agent gets the written reason back, not an empty quote
+                        self._reply(403, {"ok":False,"outcome":"denied","by_batman":deny_msg})
+                    else:
+                        self._reply(403, {"ok":False,"outcome":"denied"})
                 else:
                     self._reply(408, {"ok":False,"req_key":req_key,
                         "outcome":"timeout","note":f"Batman hasn't answered in {WAIT_MIN} min. Reprint with req_key later: {req_key}"})
@@ -1359,8 +1423,9 @@ def cmd_run(argv, passphrase):
                 self._reply(404, {"error":"unknown endpoint"})
 
     srv = http.server.HTTPServer(("127.0.0.1", port), H)
-    print(f"CipherGate server up on http://127.0.0.1:{port} (passphrase held once; Ctrl-C to stop).")
-    print(f"Agents POST /request and /resolve with their agent name + .env key.")
+    print(f"CipherGate server is running on http://127.0.0.1:{port}. "
+          f"It holds the passphrase in memory, so keep this window open (Ctrl-C to stop).")
+    print(f"Agents call it over this local address with their agent name + .env key.")
     stop = threading.Event()
     poll_t = threading.Thread(target=tg_poll_loop, args=(passphrase, stop), daemon=True)
     poll_t.start()
@@ -1382,8 +1447,10 @@ def _restore_env(old):
 def main():
     os.chmod(VT, 0o700) if os.path.exists(VT) else None
     if len(sys.argv) < 2:
-        _banner(); print("no command given. Try `python3 ciphergate.py --help`:")
-        print(__doc__); return 0
+        _banner(); print("\nNo command was given. CipherGate is the API-key vault.\n"
+                         "Run `ciphergate --help` for the full plain-English guide,\n"
+                         "or `ciphergate status` to see where things stand.")
+        return 0
     c = sys.argv[1]
     if c == "--help":
         _banner(); print(__doc__); return 0
