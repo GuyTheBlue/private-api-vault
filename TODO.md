@@ -133,3 +133,30 @@ the HTTP result. Secrets never leave, never log, never return to an agent.
 - Vault alone writes. Everything reads through the vault API.
 - Real-key steps need Batman present + explicit go.
 - A stage is done only when `regression.sh` covers it and passes.
+
+================================================================
+## FUTURE / PROPOSED — per-token URL whitelist (anti-exfiltration)
+WHY: the vault substitutes a token into whatever URL the agent chose. A
+determined agent with a valid lease could point the call at a URL IT controls
+and harvest the token from the outbound request headers. The vault can redact
+responses but cannot stop the token going OUT to a trap URL.
+
+FEATURE (Batman's idea, not yet built):
+- Each stored token carries an ALLOWED base-URL list (e.g. FAL_API_KEY ->
+  ["https://api.fal.ai"], DO key -> ["https://api.digitalocean.com"]).
+- DEFAULT = open (no restriction) unless Batman sets it — so nothing breaks
+  until he opts in per key.
+- At call time, BEFORE substitution, the vault checks the request URL against
+  the key's allowed prefixes:
+    - URL host matches an allowed base-URL  -> proceed (substitute + send)
+    - otherwise -> REFUSE the call ("URL not allowed for this key"), log it,
+      no token leaves.
+- "grep on the url wanting to use does fit pattern of keys look for" (Batman,
+  verbatim) = exact-match the request URL's host/prefix against the key's
+  allowed list. Kills the my-server.example/collect-token trap before send.
+- This does NOT replace least-privilege keys + Batman's lease approval + the
+  sensitivity no-list — it ADDS a hard per-key destination gate on top.
+STATUS: proposed. Add a `keyargs`/metadata field to add_key for `allowed_urls`,
+a `set-urls <key> <prefix,...>` Batman command, the check inside _exec_call
+before line ~982 (the sub/replace), and regression coverage (allowed call
+passes, disallowed host REFUSED, no token sent on refusal).
