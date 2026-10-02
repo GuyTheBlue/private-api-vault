@@ -102,6 +102,7 @@ leaves it open, and only then does the key matter.
 == HOW TO USE IT (all from a terminal) ==
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
+  ciphergate del    <service>                     [Batman only] PERMANENTLY remove a stored key (passphrase + type DELETE to confirm) - use this to drop a key that got stored under a wrong passphrase, then re-add it cleanly
   ciphergate list                                  show key NAMES only (never values) - no passphrase needed
   ciphergate show <service>                        [Batman only] show ONE stored key's real VALUE (passphrase-gated, to verify a key)
   ciphergate keygen <profile>                     mint a .env key for a profile (shown once)
@@ -510,6 +511,34 @@ def cmd_add(argv, passphrase):
     add_key(service, value, passphrase, rk)
     log_event({"ev":"KEY_ADD","service":service})
     print(f"Stored {service} ENCRYPTED ({len(value)} chars).")
+    return 0
+
+def cmd_del(argv, passphrase):
+    """`del <service>` — remove a stored key entirely (Batman only, passphrase-
+    gated). This is the escape hatch for a key that got stored under a WRONG
+    passphrase and can no longer be overwritten (update_value would fail to
+    unwrap it). Deleting drops the row; re-`add` it cleanly with the correct
+    passphrase. The recovery escrow for that key is also gone (the new add mints a
+    fresh one)."""
+    if len(argv) < 1: print("usage: vault.py del <service>"); return 1
+    service = argv[0]
+    try:
+        _verify_passphrase(passphrase)   # owner-level: must unlock the vault
+    except RuntimeError:
+        print("WRONG PASSPHRASE — the process could not unlock the vault. Start again with the correct passphrase.")
+        return 1
+    store = load_store()
+    if service not in store:
+        print(f"No key stored as '{service}'. Use `ciphergate list` to see the names.")
+        return 1
+    confirm = ask("VAULT_DEL_CONFIRM", f"Delete '{service}' permanently? Type DELETE to confirm: ").strip()
+    if confirm != "DELETE":
+        print("Aborted — nothing deleted.")
+        return 1
+    del store[service]
+    save_store(store)
+    log_event({"ev":"KEY_DEL","service":service,"by":"batman"})
+    print(f"DELETED {service}. Re-add it with `ciphergate add {service}` if you need it back.")
     return 0
 
 def cmd_list():
@@ -1707,6 +1736,7 @@ def main():
     table = {
         "init": lambda: cmd_init(),
         "add": lambda: cmd_add(args, passphrase),
+        "del": lambda: cmd_del(args, passphrase),
         "list": lambda: cmd_list(),
         "show": lambda: cmd_show(args, passphrase),
         "keygen": lambda: cmd_keygen(args, passphrase),

@@ -62,6 +62,14 @@ echo "$WRONG" | grep -qi "WRONG PASSPHRASE" && ok "add with WRONG passphrase is 
 (cd "$TMPV" && VAULT_PASS=okpass ./vault.py list 2>/dev/null | grep -q BETA) && bad "BETA staged despite wrong passphrase" || ok "wrong-passphrase key NOT stored"
 OVW=$(cd "$TMPV" && VAULT_PASS=badpass VAULT_REC="$RECV" VAULT_VALUE=zz ./vault.py add ALPHA </dev/null 2>&1)
 echo "$OVW" | grep -qi "WRONG PASSPHRASE" && ok "overwrite with wrong passphrase refused cleanly (no traceback)" || bad "overwrite leaked/traced: $OVW"
+# del removes a mis-keyed entry entirely so it can be re-added cleanly
+DAB=$(cd "$TMPV" && VAULT_PASS=okpass VAULT_DEL_CONFIRM=notit ./vault.py del ALPHA </dev/null 2>&1)
+echo "$DAB" | grep -qi "Aborted" && ok "del without confirmation aborts" || bad "del should abort without confirmation: $DAB"
+(cd "$TMPV" && VAULT_PASS=okpass ./vault.py list 2>/dev/null | grep -q ALPHA) && ok "ALPHA still present after aborted del" || bad "ALPHA was removed despite abort"
+DD=$(cd "$TMPV" && VAULT_PASS=okpass VAULT_DEL_CONFIRM=DELETE ./vault.py del ALPHA </dev/null 2>&1)
+echo "$DD" | grep -qi "DELETED" && ok "del with confirmation removes the mis-keyed key" || bad "del did not remove: $DD"
+(cd "$TMPV" && VAULT_PASS=okpass ./vault.py list 2>/dev/null | grep -q ALPHA) && bad "ALPHA still in store after del" || ok "ALPHA gone after del"
+(cd "$TMPV" && grep -q '"ev": *"KEY_DEL"' .vault/ledger.jsonl) && ok "KEY_DEL logged to ledger" || bad "no KEY_DEL ledger event"
 
 # ---------- 3. identity: NO key -> denied ----------
 step "no key denied"
