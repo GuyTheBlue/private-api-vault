@@ -143,7 +143,7 @@ WHY THIS MATTERS TO YOU
     the secrets are locked to the ORIGINAL passphrase and recovery key. The
     only two keys that can open the vault are the two from the original setup.
 """
-import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time
+import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time, threading
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 VT   = os.path.join(BASE, ".vault")
@@ -157,6 +157,13 @@ _LEASE_TAG  = "gsq-vault-lease-v1"
 _PENDING_TAG = "gsq-vault-pending-v1"
 _ACCESS_TAG = "gsq-vault-access-v1"
 WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
+CALL_TIMEOUT = int(os.environ.get("VAULT_CALL_TIMEOUT", "300"))  # upstream HTTP read timeout (default 300s; set lower for quick health checks)
+# A single lock guards ALL signed state-file read-modify-write. The per-save
+# lock inside _signed_save only protects the write; the RACE that matters (two
+# agents staging a pending entry at the same instant both load, add, then save
+# - last writer wins, one entry lost) needs the WHOLE modify held under one lock.
+# Hold _STATE_LOCK across every load->mutate->save sequence on pending/leases.
+_STATE_LOCK = threading.RLock()
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -331,19 +338,27 @@ def _check_bundle(raw, key):
 
 def _signed_load(path, passphrase, tag, default):
     """Load (data, status). status 'ok'|'missing'|'tampered'."""
-    if not os.path.exists(path):
-        return default, "missing"
-    try:
-        raw = json.load(open(path))
-    except Exception:
-        return default, "tampered"
-    data = _check_bundle(raw, sign_key(passphrase, tag))
-    if data is None:
-        return default, "tampered"
-    return data, "ok"
+    with _STATE_LOCK:
+        if not os.path.exists(path):
+            return default, "missing"
+        try:
+            raw = json.load(open(path))
+        except Exception:
+            return default, "tampered"
+        data = _check_bundle(raw, sign_key(passphrase, tag))
+        if data is None:
+            return default, "tampered"
+        return data, "ok"
 
 def _signed_save(path, data, passphrase, tag):
-    json.dump(_bundle(data, sign_key(passphrase, tag)), open(path, "w"), indent=2)
+    """Write atomically: temp file + rename, under the state lock, so two
+    concurrent threads (agents) can't interleave into a corrupt/partial file."""
+    with _STATE_LOCK:
+        payload = json.dumps(_bundle(data, sign_key(passphrase, tag)), indent=2)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(payload)
+        os.replace(tmp, path)
     os.chmod(path, 0o600)
 
 # ---------- access map (profile -> hash of its .env key) ----------
@@ -696,7 +711,12 @@ def classify_request(http):
             return "flag", f"sensitive scope ({why})"
     return "ok", ""
 
-def cmd_request(argv, passphrase):
+def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
+    """`request <method> <http> <expiry_min> <reason> [--keys ..] [--header ..] [--data ..]`
+    `agent_override`+`presented_key` are the multi-thread-safe path: the SERVER
+    already verified agent+key (via _verify_agent_key) and passes them in, so
+    this function does NOT touch the process-global os.environ. When they are
+    None (CLI path), identity is derived from HERMES_HOME + the .env key as usual."""
     if len(argv) < 3:
         print("usage: vault.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>]")
         return 1
@@ -724,8 +744,13 @@ def cmd_request(argv, passphrase):
             parts.append(a); i += 1
     reason = " ".join(parts)
 
-    # WHO is knocking? runner derives from HOME env; its key must own it.
-    runner, ok_id, why = verify_identity(passphrase)
+    # WHO is knocking? The CLI derives runner from HOME env; its key must own
+    # it. The server path passes agent_override (already verified by
+    # _verify_agent_key) so it never touches shared os.environ under threads.
+    if agent_override:
+        runner, ok_id, why = agent_override, True, ""
+    else:
+        runner, ok_id, why = verify_identity(passphrase)
     if not ok_id:
         log_event({"ev":"ACCESS_DENIED","runner":runner,"outcome":"DENY","why":why})
         print(f"DENIED: {why} 'Not in my city.'")
@@ -1020,7 +1045,7 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     body = final_data.encode() if isinstance(final_data, str) else (final_data or bytes())
     req = urllib.request.Request(final_url, data=body or None, headers=final_headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
             rbody = resp.read().decode(errors="replace")
         log_event({"ev":"CALL","agent":agent,"method":method,"url":url,
                    "keys":keys,"status":resp.status})
@@ -1484,17 +1509,17 @@ def cmd_run(argv, passphrase):
                     args += ["--header", f"{hn}:{hv}"]
                 if p.get("data") is not None:
                     args += ["--data", json.dumps(p["data"]) if isinstance(p["data"],(dict,list)) else str(p["data"])]
-                # args are already clean per-token values from JSON; the old
-                # _split roundtrip here SPLIT header values at internal spaces
-                # (e.g. "Authorization: Bearer [FAL]" -> lost the [FAL] placeholder).
-                # Pass them through as-is so substitution survives.
-                old = {"H":os.environ.get("HERMES_HOME"),"K":os.environ.get("VAULT_AGENT_KEY")}
-                os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
-                os.environ["VAULT_AGENT_KEY"] = key
-                try:
-                    rc = cmd_request(args, passphrase)
-                finally:
-                    _restore_env(old)
+                # args are already clean per-token values from JSON; pass them
+                # through as-is so substitution survives (headers must not be
+                # re-split at internal spaces, which used to lose the placeholder).
+                # THREAD-SAFE identity: _verify_agent_key(agent,key) above already
+                # proved WHO this is, so pass it straight to cmd_request instead of
+                # mutating the process-global os.environ (that would race across
+                # concurrent agent threads). Each /request runs on its own thread
+                # (ThreadingHTTPServer), so a long render on thread A does NOT
+                # block agent B's request on thread B.
+                with _STATE_LOCK:
+                    rc = cmd_request(args, passphrase, agent_override=agent, presented_key=key)
                 if isinstance(rc, dict):
                     # LEASE path already ran the call -> relay the RESULT now, no wait.
                     self._reply(rc.get("status") is not None and 200 or 502,
@@ -1533,13 +1558,10 @@ def cmd_run(argv, passphrase):
                         break  # entry gone -> verdict consumed
                     time.sleep(0.5)
                 if verdict == "yes":
-                    # resolve it here: pop + grant(if lease) + make the call
-                    os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
-                    os.environ["VAULT_AGENT_KEY"] = key
-                    try:
-                        rr = cmd_resolve([req_key], passphrase)
-                    finally:
-                        _restore_env(old)
+                    # resolve it here: pop + grant(if lease) + make the call.
+                    # cmd_resolve identifies the agent from the pending entry, so
+                    # no os.environ mutation here — this is thread-safe.
+                    rr = cmd_resolve([req_key], passphrase)
                     # rr is now {"status":..,"body":..} when the call ran -> relay the RESULT to the agent
                     if isinstance(rr, dict):
                         self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved",
@@ -1557,12 +1579,9 @@ def cmd_run(argv, passphrase):
                             deny_msg = pend_tmp[req_key].get("msg", "")
                     except Exception:
                         pass
-                    os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
-                    os.environ["VAULT_AGENT_KEY"] = key
-                    try:
-                        rrc = cmd_resolve([req_key], passphrase)
-                    finally:
-                        _restore_env(old)
+                    # cmd_resolve identifies the agent from the pending entry, so
+                    # no env mutation; thread-safe.
+                    rrc = cmd_resolve([req_key], passphrase)
                     if verdict == "other":
                         # agent gets the written reason back, not an empty quote
                         self._reply(403, {"ok":False,"outcome":"denied","by_batman":deny_msg})
@@ -1578,18 +1597,18 @@ def cmd_run(argv, passphrase):
                 if not ok:
                     self._reply(403, {"ok":False,"denied":why}); return
                 req_key = p.get("req_key","")
-                old = {"H":os.environ.get("HERMES_HOME"),"K":os.environ.get("VAULT_AGENT_KEY")}
-                os.environ["HERMES_HOME"] = f"/Users/guymeaker/.hermes/profiles/{agent}"
-                os.environ["VAULT_AGENT_KEY"] = key
-                try:
-                    rc = cmd_resolve([req_key], passphrase)
-                finally:
-                    _restore_env(old)
+                # cmd_resolve identifies the agent from the pending entry, so no
+                # env mutation is needed and this is thread-safe.
+                rc = cmd_resolve([req_key], passphrase)
                 self._reply(200, {"ok":True,"rc":rc})
             else:
                 self._reply(404, {"error":"unknown endpoint"})
 
-    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    # ThreadingHTTPServer: each /request runs on its OWN thread, so one agent's
+    # long upstream call (e.g. a 200s fal render) never blocks another agent's
+    # request. The _STATE_LOCK guards the shared state files (pending/leases)
+    # so concurrent staging / leasing is safe.
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
     print(f"CipherGate server is running on http://127.0.0.1:{port}. "
           f"It holds the passphrase in memory, so keep this window open (Ctrl-C to stop).")
     print(f"Agents call it over this local address with their agent name + .env key.")
@@ -1605,11 +1624,7 @@ def cmd_run(argv, passphrase):
     stop.set()
     return 0
 
-def _restore_env(old):
-    if old["H"] is None: os.environ.pop("HERMES_HOME", None)
-    else: os.environ["HERMES_HOME"] = old["H"]
-    if old["K"] is None: os.environ.pop("VAULT_AGENT_KEY", None)
-    else: os.environ["VAULT_AGENT_KEY"] = old["K"]
+
 
 def main():
     os.chmod(VT, 0o700) if os.path.exists(VT) else None

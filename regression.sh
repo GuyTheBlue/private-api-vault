@@ -423,6 +423,59 @@ echo "$QSB" | grep -qi "REFUSED\|bare key" && ok "bare query name refused by URL
 kill "$EQS" 2>/dev/null
 pkill -f "vault.py run --port $VPSRV2" 2>/dev/null
 
+# ---------- 22d. concurrent agents (threaded server) — both stage + complete ----------
+step "two concurrent agents /request both complete with distinct identities"
+# concb must be minted under the CURRENT (passV3) passphrase — the `mint` helper
+# hardcodes $PASS which no longer opens the store this late in the suite.
+KEY_concb=$(VAULT_PASS=passV3 python3 vault.py keygen concb 2>/dev/null | grep '^VAULT_AGENT_KEY=' | cut -d= -f2)
+VPSRV3=18298
+cat >"$SCRATCH/echo_conc.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json, time
+class H(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def _echo(self):
+        ln=int(self.headers.get("Content-Length",0) or 0)
+        self.rfile.read(ln)
+        time.sleep(0.2)
+        body=json.dumps({"path":self.path,"tag":self.headers.get("X-Agent","")}).encode()
+        self.send_response(200); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+    do_GET=_echo; do_POST=_echo
+HTTPServer(("127.0.0.1",18175), H).serve_forever()
+PY
+python3 "$SCRATCH/echo_conc.py" >/dev/null 2>&1 &
+ECONC=$!
+(VAULT_PASS=passV3 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV3 >"$SCRATCH/server3.log" 2>&1 &)
+sleep 2
+curl -s --max-time 2 "http://127.0.0.1:$VPSRV3/health" >/dev/null || { bad "concurrent server not up"; }
+# two DISTINCT identities: x_bare (KEY_x_bare) + concb (KEY_concb); their /request
+# posts both stage a pending entry and both must survive + complete with their own tag.
+cat >"$SCRATCH/conc_a.json" <<EOF
+{"agent":"x_bare","key":"$BK__KEY","method":"POST","url":"http://127.0.0.1:18175/anything","expiry":0,"reason":"conc alice","keys":["fal"],"headers":{"Authorization":"Bearer [fal]","X-Agent":"alice"}}
+EOF
+cat >"$SCRATCH/conc_b.json" <<EOF
+{"agent":"concb","key":"$KEY_concb","method":"POST","url":"http://127.0.0.1:18175/anything","expiry":0,"reason":"conc bob","keys":["fal"],"headers":{"Authorization":"Bearer [fal]","X-Agent":"bob"}}
+EOF
+curl -s -X POST "http://127.0.0.1:$VPSRV3/request" -H 'Content-Type: application/json' -d @"$SCRATCH/conc_a.json" >"$SCRATCH/conc_rA.json" &
+PC_A=$!
+curl -s -X POST "http://127.0.0.1:$VPSRV3/request" -H 'Content-Type: application/json' -d @"$SCRATCH/conc_b.json" >"$SCRATCH/conc_rB.json" &
+PC_B=$!
+sleep 2
+CCNT=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep -cE 'x_bare|concb')
+[ "$CCNT" -ge 2 ] && ok "two concurrent /request entries BOTH staged (lock prevents lost write)" || bad "expected 2 staged, got $CCNT"
+for RK in $(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep -E 'x_bare|concb' | awk '{print $1}'); do
+  VAULT_PASS=passV3 python3 vault.py decide "$RK" yes >/dev/null 2>&1
+done
+wait $PC_A $PC_B
+RC_A=$(cat "$SCRATCH/conc_rA.json"); RC_B=$(cat "$SCRATCH/conc_rB.json")
+echo "$RC_A" | grep -q '"outcome": "approved"' && ok "concurrent request A approved" || bad "conc A failed: $RC_A"
+echo "$RC_B" | grep -q '"outcome": "approved"' && ok "concurrent request B approved" || bad "conc B failed: $RC_B"
+echo "$RC_A" | grep -q 'tag.*alice' && ok "conc A kept alice identity" || bad "conc A tag wrong: $RC_A"
+echo "$RC_B" | grep -q 'tag.*bob' && ok "conc B kept bob identity" || bad "conc B tag wrong: $RC_B"
+kill "$ECONC" 2>/dev/null
+pkill -f "vault.py run --port $VPSRV3" 2>/dev/null
+
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"
