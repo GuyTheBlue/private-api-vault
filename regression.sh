@@ -336,6 +336,44 @@ echo "$LEAK_RESULT" | grep -q "\[REDACTED\]" && ok "echo body has [REDACTED] (se
 echo "$LEAK_RESULT" | grep -q "dummy_fal_key_ABC123" && bad "RAW SECRET leaked in response!" || ok "no raw secret value in agent response"
 kill "$ESTUB" 2>/dev/null
 
+# ---------- 22b. /request relays a JSON body to the call (data field) ----------
+step "server /request relays the data body to the call"
+VPSRV=18295
+# reuse the echo stub from test 22 (still running on 18184, echoes headers+we need body too)
+cat >"$SCRATCH/echo_body.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+class H(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def _echo(self):
+        ln=int(self.headers.get("Content-Length",0) or 0)
+        raw=self.rfile.read(ln).decode()
+        body=json.dumps({"path":self.path,"body":raw,"ct":self.headers.get("Content-Type","")}).encode()
+        self.send_response(200); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+    do_GET=_echo; do_POST=_echo
+HTTPServer(("127.0.0.1",18178), H).serve_forever()
+PY
+python3 "$SCRATCH/echo_body.py" >/dev/null 2>&1 &
+EBODY=$!
+(VAULT_PASS=passV3 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV >"$SCRATCH/server.log" 2>&1 &)
+sleep 2
+cat >"$SCRATCH/dr_req.json" <<EOF
+{"agent":"x_bare","key":"$BK__KEY","method":"POST","url":"http://127.0.0.1:18178/anything","expiry":0,"reason":"data relay test","keys":["fal"],"headers":{"Authorization":"Bearer [fal]","Content-Type":"application/json"},"data":{"prompt":"relay_probe_xyz","n":2}}
+EOF
+# first POST runs in the BACKGROUND (server holds the request open waiting for approval)
+curl -s -X POST "http://127.0.0.1:$VPSRV/request" -H 'Content-Type: application/json' \
+  -d @"$SCRATCH/dr_req.json" >"$SCRATCH/dr_first.json" &
+CP=$!
+sleep 1.5
+RK2=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep x_bare | awk '{print $1}' | head -1)
+[ -n "$RK2" ] && VAULT_PASS=passV3 python3 vault.py decide "$RK2" yes >/dev/null 2>&1
+wait $CP
+DRRESP=$(cat "$SCRATCH/dr_first.json")
+echo "$DRRESP" | grep -q "relay_probe_xyz" && ok "server /request relays the JSON body to the call" || bad "data body NOT relayed: $DRRESP"
+kill "$EBODY" 2>/dev/null
+pkill -f "vault.py run --port $VPSRV" 2>/dev/null
+
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"

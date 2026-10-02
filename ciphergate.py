@@ -1474,6 +1474,8 @@ def cmd_run(argv, passphrase):
                 if p.get("keys"): args += ["--keys", ",".join(p["keys"])]
                 for hn,hv in (p.get("headers") or {}).items():
                     args += ["--header", f"{hn}:{hv}"]
+                if p.get("data") is not None:
+                    args += ["--data", json.dumps(p["data"]) if isinstance(p["data"],(dict,list)) else str(p["data"])]
                 # args are already clean per-token values from JSON; the old
                 # _split roundtrip here SPLIT header values at internal spaces
                 # (e.g. "Authorization: Bearer [FAL]" -> lost the [FAL] placeholder).
