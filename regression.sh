@@ -71,6 +71,43 @@ echo "$DD" | grep -qi "DELETED" && ok "del with confirmation removes the mis-key
 (cd "$TMPV" && VAULT_PASS=okpass ./vault.py list 2>/dev/null | grep -q ALPHA) && bad "ALPHA still in store after del" || ok "ALPHA gone after del"
 (cd "$TMPV" && grep -q '"ev": *"KEY_DEL"' .vault/ledger.jsonl) && ok "KEY_DEL logged to ledger" || bad "no KEY_DEL ledger event"
 
+# ---------- 2d. the PERSISTENT fuckup: a corrupt key poisons add; del repairs; re-add works ----------
+step "corrupt-key recovery: add refused (names the key), del repairs, re-add works"
+CPV=$(mktemp -d)
+cp ciphergate.py "$CPV/vault.py"
+CPRP=$(cd "$CPV" && VAULT_PASS=gg ./vault.py init)
+CREC=$(echo "$CPRP" | grep -A1 'RECOVERY' | tail -1 | tr -d '[:space:]')
+(cd "$CPV" && VAULT_PASS=gg VAULT_REC="$CREC" VAULT_VALUE=fal ./vault.py add FAL_API_KEY </dev/null >/dev/null 2>&1)
+# inject a corrupt row (wrapped under a DIFFERENT passphrase) — simulates the old bug's record
+(cd "$CPV" && python3 - <<'PY'
+import json, os
+store = json.load(open('.vault/keys.json'))
+salt = os.urandom(16); dk = os.urandom(32).hex(); iv1, iv2 = [os.urandom(16).hex() for _ in range(2)]
+import subprocess, base64, hashlib as hl, hmac as hm
+aes = lambda kh, iv, d, dec=False: subprocess.run(["openssl","enc","-aes-256-cbc","-d" if dec else "-e","-K",kh,"-iv",iv,"-nosalt"], input=d, capture_output=True).stdout
+pk_bad = hl.pbkdf2_hmac("sha256", "badpass".encode(), salt, 200000, 32).hex()
+store["HF_TOKEN"] = {"ct": base64.b64encode(aes(dk, iv1, b"bad")).decode(), "iv1": iv1,
+  "salt": base64.b64encode(salt).decode(), "dk_pass": base64.b64encode(aes(pk_bad, iv2, bytes.fromhex(dk))).decode(),
+  "iv2": iv2, "dk_rec": base64.b64encode(aes("0"*64, iv2, bytes.fromhex(dk))).decode(), "iv3": iv2,
+  "created": "2026-10-02T00:00:00Z", "note":"corrupt"}
+json.dump(store, open('.vault/keys.json','w'))
+print("injected")
+PY
+)
+# adding ANY key with correct pass NOW refuses + names the corrupt key (no traceback)
+CPNA=$(cd "$CPV" && VAULT_PASS=gg VAULT_REC="$CREC" VAULT_VALUE=x ./vault.py add OTHER </dev/null 2>&1)
+echo "$CPNA" | grep -qi "HF_TOKEN" && ok "corrupt key poisons add -> message names HF_TOKEN (no traceback)" || bad "did not name corrupt key: $CPNA"
+echo "$CPNA" | grep -q "Traceback" && bad "traceback on corrupt-key add" || ok "no traceback on corrupt-key add"
+# del the corrupt key works (owner-check, not key-decrypt)
+CPDEL=$(cd "$CPV" && VAULT_PASS=gg VAULT_DEL_CONFIRM=DELETE ./vault.py del HF_TOKEN </dev/null 2>&1)
+echo "$CPDEL" | grep -qi "DELETED" && ok "del removes the corrupt key (owner-check)" || bad "del failed on corrupt key: $CPDEL"
+# re-add cleanly + round-trip
+(cd "$CPV" && VAULT_PASS=gg VAULT_REC="$CREC" VAULT_VALUE=clean ./vault.py add HF_TOKEN </dev/null >/dev/null 2>&1)
+(cd "$CPV" && VAULT_PASS=gg ./vault.py show HF_TOKEN </dev/null 2>/dev/null | grep -q clean) && ok "re-added HF_TOKEN shows its value" || bad "re-add/recovery failed"
+# now a NEW key also adds fine again
+(cd "$CPV" && VAULT_PASS=gg VAULT_REC="$CREC" VAULT_VALUE=x ./vault.py add OTHER </dev/null >/dev/null 2>&1)
+(cd "$CPV" && VAULT_PASS=gg ./vault.py list 2>/dev/null | grep -q OTHER) && ok "new key adds fine after the corrupt key is removed" || bad "new key not addable post-repair"
+
 # ---------- 3. identity: NO key -> denied ----------
 step "no key denied"
 R3=$(HERMES_HOME=/Users/guymeaker/.hermes/profiles/link VAULT_PASS=$PASS python3 vault.py request GET https://x 0 r 2>&1)

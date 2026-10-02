@@ -331,13 +331,39 @@ def rekey_recovery_key(service, old_rec, new_rec):
     save_store(store)
 
 def _verify_passphrase(passphrase):
-    """Attempt to prove the passphrase can decrypt the store. Raises RuntimeError
-    if it can't (used at server startup so a wrong passphrase fails cleanly)."""
+    """Prove the passphrase unlocks the CURRENT vault, or raise RuntimeError with
+    a message explaining exactly what failed.
+
+    Checks EVERY stored key, not just the first — so a single key stored under a
+    wrong passphrase (a partial/corrupt store) is caught, not silently skipped.
+    When the key store is empty, it verifies against the signed access file (HMAC
+    keyed to the passphrase), which exists from `init` — so even the FIRST `add`
+    is checked against the real passphrase, never silently wrapped under a typo."""
     store = load_store()
-    if not store:
-        return True  # empty store — nothing to decrypt yet, passphrase is untested
-    svc = next(iter(store))          # any stored entry
-    unwrap(svc, passphrase)          # raises RuntimeError if the passphrase is wrong
+    if store:
+        for svc in sorted(store):
+            try:
+                unwrap(svc, passphrase)
+            except Exception:
+                raise RuntimeError(f"Unable to unlock with that passphrase: key '{svc}' is locked under a different passphrase (it was probably added with a wrong one). Fix it: `ciphergate del {svc}` then `ciphergate add {svc}` again.")
+        return True
+    # empty key store: the passphrase must still match the signed state from init
+    _, st = _signed_load(AF, passphrase, _ACCESS_TAG, {})
+    if st in ("ok", "missing"):
+        return True
+    raise RuntimeError("the passphrase does not match the vault's signed state (wrong passphrase).")
+
+def _verify_owner(passphrase):
+    """Prove the passphrase is the vault OWNER's WITHOUT decrypting any key.
+    Checks the signed state files (access / lease / pending — all HMAC-keyed to
+    the passphrase from `init` and every subsequent write). A wrong passphrase
+    fails the signature check; a corrupt key does NOT block this (del needs to
+    remove corrupt keys). Raises RuntimeError if the passphrase is wrong."""
+    for path, tag in ((AF, _ACCESS_TAG), (LF_, _LEASE_TAG), (PF, _PENDING_TAG)):
+        if os.path.exists(path):
+            data, st = _signed_load(path, passphrase, tag, None)
+            if st == "tampered":
+                raise RuntimeError("the passphrase does not match the vault's signed state (online files appear corrupt or are under a different passphrase).")
     return True
 
 def unwrap(service, passphrase):
@@ -491,8 +517,8 @@ def cmd_add(argv, passphrase):
     # undecryptable by the real passphrase). Refuse cleanly instead.
     try:
         _verify_passphrase(passphrase)
-    except RuntimeError:
-        print("WRONG PASSPHRASE — the process could not unlock the vault. Start again with the correct passphrase.")
+    except RuntimeError as ex:
+        print("WRONG PASSPHRASE —", ex)
         return 1
     service = argv[0]
     value = ask("VAULT_VALUE", "Paste the API key value (hidden): ")
@@ -522,10 +548,15 @@ def cmd_del(argv, passphrase):
     fresh one)."""
     if len(argv) < 1: print("usage: vault.py del <service>"); return 1
     service = argv[0]
+    # Owner-level proof: the passphrase must match the vault's signed state
+    # (HMAC-keyed to the passphrase). We do NOT decrypt keys here — because del
+    # exists to REMOVE a corrupt key, and a corrupt key would poison the all-keys
+    # verify. Ownership is proven by the signed access/lease files, independent
+    # of the key ciphertexts.
     try:
-        _verify_passphrase(passphrase)   # owner-level: must unlock the vault
-    except RuntimeError:
-        print("WRONG PASSPHRASE — the process could not unlock the vault. Start again with the correct passphrase.")
+        _verify_owner(passphrase)
+    except RuntimeError as ex:
+        print("WRONG PASSPHRASE —", ex)
         return 1
     store = load_store()
     if service not in store:
