@@ -39,6 +39,38 @@ CipherGate pushes the approval ask to Batman's Telegram with real buttons.
 You tap, the vault acts. (The older `decide <key> yes|no|other [msg]` command
 still works for the same purpose from the terminal.)
 
+== THE HTTP API (what agents call — server model) ==
+`ciphergate run` starts a LOCAL server that a real agent process calls over
+HTTP. The agent never runs the CLI itself, has no passphrase, and never sees a
+secret. The agent sends WHO it is (agent name + the secret .env key, which stays
+in the agent's own profile) and the call it wants; the vault verifies, gets
+Batman's approval if needed, substitutes the token in memory, makes the call,
+and returns the result. Endpoints (all localhost, default port 18200):
+  GET  /health    -> {"status":"up","vault":".vault"}
+  POST /request   -> stage a call and WAIT for the verdict (the main one)
+  POST /resolve   -> pick up a verdict later, using a request key (come-back-later case)
+The /request body (the shape an AGENT sends an API call through):
+  {
+    "agent": "spielberg",                 # who is asking
+    "key": "$VAULT_AGENT_KEY",            # that agent's .env key, proves identity
+    "method": "POST",                     # GET / POST / PUT / DELETE / PATCH
+    "url": "https://<endpoint>",
+    "expiry": 0,                          # 0 = one-off, no lease; N = lease N minutes
+    "reason": "honest statement of why",
+    "keys": ["FAL_API_KEY"],              # stored key NAMES to activate
+    "headers": {"Authorization": "Bearer [FAL_API_KEY]", "Content-Type": "application/json"},
+    "data": { ... },                      # optional JSON body the API takes
+    "timeout": 300                        # optional; per-call read timeout in seconds
+  }
+The `[KEY_NAME]` bracket markers are the ONLY thing substituted — the vault swaps
+the real token where the marker sits: in a header value, a query string in the
+URL, or inside the body. Put the marker exactly where the target API wants the
+token, and keep the brackets. Any data/header/URL field without brackets is
+forwarded verbatim. `timeout` defaults to 300s (override per call with an
+integer; set it high enough for slow jobs like image generation). The server is
+multi-threaded, so one agent's slow call never blocks another's — they run on
+separate threads and each waits only on its own Batman approval.
+
 == TAMPER-PROOFING ==
 The state files (access / lease / pending) carry a secret signature (HMAC)
 keyed to the vault passphrase. Only someone with the passphrase can write/alter
@@ -87,6 +119,7 @@ leaves it open, and only then does the key matter.
   ciphergate update                              change the passphrase (needs the current one)
   ciphergate status                              where the store lives + how many keys
   ciphergate run --port 18200                    start the local server agents call over HTTP
+  ciphergate bot set|info|clear                     configure the Telegram approval bot (token + chat id, stored encrypted; `info` masks the token, `clear` removes it)
 
 == WHERE FILES LIVE (all inside .vault/, kept out of git) ==
   .vault/keys.json       the encrypted key store
@@ -1652,7 +1685,7 @@ def main():
                          "or `ciphergate status` to see where things stand.")
         return 0
     c = sys.argv[1]
-    if c == "--help":
+    if c in ("--help", "-h", "help"):
         _banner(); print(__doc__); return 0
     args = sys.argv[2:]
     no_pass = c in ("init", "list", "ledger", "recover", "run")
