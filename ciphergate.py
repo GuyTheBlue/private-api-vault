@@ -99,6 +99,30 @@ leaves it open, and only then does the key matter.
   It exists ONLY for quick manual tests and the regression suite - you would
   NOT use it for a real agent request, because it skips every gate.
 
+== ADDING & UPDATING KEYS (the passphrase is verified first) ==
+`ciphergate add <service>` UNLOCKS the vault to put a key in — so it requires
+the CORRECT passphrase, every time. Before anything is written, CipherGate proves
+your passphrase actually opens the existing vault (it checks EVERY stored key, or
+the signed vault state when the store is still empty). If you type a WRONG
+passphrase, `add` refuses cleanly — the key is NOT added. A wrong passphrase can
+never silently wrap a new key under a different secret and leave you with a key
+you can't later read.
+  - First key ever: even the very first `add` is checked against the passphrase
+    set at `init` — a typo there is caught, not done silently.
+  - Correct flow: `ciphergate add FAL_API_KEY` (enter passphrase, paste the value,
+    paste the recovery key the first time) -> it verifies, then stores.
+If a key was somehow stored under the wrong passphrase (the only way this can
+happen is an add done before this guard existed), CipherGate REFUSES to add any
+key until you clean it up, and tells you exactly what's wrong and what to do. It
+will say something like:
+  WRONG PASSPHRASE — Unable to unlock ...: key 'HF_TOKEN' is locked under a
+  different passphrase ... Fix it: `ciphergate del HF_TOKEN` then
+  `ciphergate add HF_TOKEN` again.
+  -> Run `ciphergate del HF_TOKEN` (type DELETE to confirm), then `ciphergate add
+     HF_TOKEN` with the correct passphrase. `del` works on a corrupt key even
+     though it can't be decrypted, because it proves ownership from the vault's
+     signed state rather than from the key itself.
+
 == HOW TO USE IT (all from a terminal) ==
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
