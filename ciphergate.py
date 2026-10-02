@@ -74,13 +74,13 @@ leaves it open, and only then does the key matter.
   ciphergate show <service>                        [Batman only] show ONE stored key's real VALUE (passphrase-gated, to verify a key)
   ciphergate keygen <profile>                     mint a .env key for a profile (shown once)
   ciphergate access list|add|remove               manage which profiles are allowed
-  ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>]
+  ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>] [--timeout <secs>]
                                                  ask the gate to make a call for an agent
   ciphergate pending                             show requests waiting for approval (or `pending clear` to wipe the wait list)
   ciphergate decide  <req_key> <yes|no|other> [msg]   approve/refuse a pending request (terminal alternative to the Telegram buttons)
   ciphergate resolve <req_key>                   [TEST/REGRESSION only] agent picks up a verdict - you normally will not use this
   ciphergate lease                               show active leases (standing grants)
-  ciphergate call <method> <url> [--header "N:[key]"] [--data <json>]   [TEST/REGRESSION only] manual substitute+send, skips all gates
+  ciphergate call <method> <url> [--header "N:[key]"] [--data <json>] [--timeout <secs>]   [TEST/REGRESSION only] manual substitute+send, skips all gates
   ciphergate ledger                              read the full audit history
   ciphergate recover                             set a new passphrase using the off-site recovery key
   ciphergate rotate-recovery-key                 retire the OLD recovery key for a brand-new one (use if a key is compromised)
@@ -718,7 +718,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     this function does NOT touch the process-global os.environ. When they are
     None (CLI path), identity is derived from HERMES_HOME + the .env key as usual."""
     if len(argv) < 3:
-        print("usage: vault.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>]")
+        print("usage: vault.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>] [--timeout <secs>]")
         return 1
     method = argv[0].upper()
     http = argv[1]
@@ -729,6 +729,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     # optional flags: --keys a,b | --header "Name:[key]" | --data <json>; the
     # leftover words form the REASON (flags must not pollute it).
     keys, headers, data = [], {}, None
+    timeout = None
     parts = []
     i = 3
     while i < len(argv):
@@ -740,6 +741,12 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
             headers[nv[0].strip()] = nv[1].strip() if len(nv) > 1 else ""; i += 2
         elif a == "--data":
             data = argv[i+1]; i += 2
+        elif a == "--timeout":
+            try:
+                timeout = int(argv[i+1])
+            except (ValueError, IndexError):
+                print("--timeout needs whole seconds (integer)"); return 1
+            i += 2
         else:
             parts.append(a); i += 1
     reason = " ".join(parts)
@@ -790,7 +797,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
             log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE",
                        "keys":keys,"expires":lease.get("expires_iso")})
             print(f"ACTIVE LEASE covers {agent} for [{','.join(keys)}] (expires {lease['expires_iso']}).")
-            res = _exec_call(method, http, headers, data, keys, passphrase, agent)
+            res = _exec_call(method, http, headers, data, keys, passphrase, agent, timeout)
             return res if isinstance(res, dict) else 0   # return the RESULT so the server can relay it
 
     # No lease -> stage a PENDING entry with a UNIQUE key, ask Batman.
@@ -803,6 +810,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     pending[req_key] = {
         "agent": agent, "method": method, "http": http, "reason": reason,
         "expiry_min": expiry, "keys": keys, "headers": headers, "data": data,
+        "timeout": timeout,
         "asked_at": now_iso(), "asked_epoch": now_epoch(), "status": "pending",
         "msg": "", "lease_created": False,
         "flag": detail if flagged else "",
@@ -922,7 +930,7 @@ def cmd_resolve(argv, passphrase):
         if not keys:
             print(f"Approved [{req_key}] {e2['agent']}. One-off call ({e2['http']}).")
             res = _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
-                       e2.get("data"), [], passphrase, e2["agent"])
+                       e2.get("data"), [], passphrase, e2["agent"], e2.get("timeout"))
             return res if isinstance(res, dict) else 0
         # keys requested: if a lease was asked for (expiry>0) and BATMAN approved,
         # record agent+keys+expiry. If no expiry granted (0), it's a one-off call on
@@ -951,7 +959,7 @@ def cmd_resolve(argv, passphrase):
             print(f"Approved [{req_key}] {e2['agent']} for [{','.join(keys)}]. One-off call, no lease.")
             lease_info = {"granted":False,"minutes":0,"keys":keys}
         res = _exec_call(e2.get("method","GET"), e2["http"], e2.get("headers") or {},
-                   e2.get("data"), keys, passphrase, e2["agent"])
+                   e2.get("data"), keys, passphrase, e2["agent"], e2.get("timeout"))
         if isinstance(res, dict):
             res["lease"] = lease_info    # tell the agent about the lease (names only)
         return res if isinstance(res, dict) else 0
@@ -976,7 +984,7 @@ def cmd_lease(passphrase):
         print(f"{l['agent']}  keys=[{keys}]  http={l.get('http','')}  expires {l.get('expires_iso')}")
     return 0
 
-def _exec_call(method, url, headers, data, keys, passphrase, agent):
+def _exec_call(method, url, headers, data, keys, passphrase, agent, timeout=None):
     """Substitute+send scoped to ONLY the granted keys. `keys` is the list of
     secret names this call/lease is permitted to use. Any [name] placeholder in
     a header or body that is NOT in `keys` is LEFT AS-IS (never substituted),
@@ -1045,7 +1053,8 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     body = final_data.encode() if isinstance(final_data, str) else (final_data or bytes())
     req = urllib.request.Request(final_url, data=body or None, headers=final_headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
+        use_tmo = timeout if timeout is not None else CALL_TIMEOUT
+        with urllib.request.urlopen(req, timeout=use_tmo) as resp:
             rbody = resp.read().decode(errors="replace")
         log_event({"ev":"CALL","agent":agent,"method":method,"url":url,
                    "keys":keys,"status":resp.status})
@@ -1064,13 +1073,14 @@ def cmd_call(argv, passphrase):
     # MANUALLY by a caller (secrets never leave the vault). Only the keys named
     # in the header/body placeholders are substituted.
     if len(argv) < 3:
-        print("usage: vault.py call <method> <url> [--header 'Name:[key_name]']... [--data <json>]")
+        print("usage: vault.py call <method> <url> [--header 'Name:[key_name]']... [--data <json>] [--timeout <secs>]")
         return 1
     method = argv[0].upper()
     url = argv[1]
     headers = {}
     data = None
     keys = []
+    timeout = None
     i = 2
     while i < len(argv):
         if argv[i] == "--header":
@@ -1081,6 +1091,12 @@ def cmd_call(argv, passphrase):
             i += 2
         elif argv[i] == "--data":
             data = argv[i+1]; i += 2
+        elif argv[i] == "--timeout":
+            try:
+                timeout = int(argv[i+1])
+            except (ValueError, IndexError):
+                print("--timeout needs whole seconds (integer)"); return 1
+            i += 2
         else:
             i += 1
     if method in ("POST", "PUT", "PATCH") and data is None:
@@ -1096,7 +1112,7 @@ def cmd_call(argv, passphrase):
         for name in st:
             if ("[" + name + "]") in data and name not in keys:
                 keys.append(name)
-    _exec_call(method, url, headers, data, keys, passphrase, "--manual")
+    _exec_call(method, url, headers, data, keys, passphrase, "--manual", timeout)
     return 0
 
 def cmd_recover():
@@ -1509,6 +1525,8 @@ def cmd_run(argv, passphrase):
                     args += ["--header", f"{hn}:{hv}"]
                 if p.get("data") is not None:
                     args += ["--data", json.dumps(p["data"]) if isinstance(p["data"],(dict,list)) else str(p["data"])]
+                if p.get("timeout") is not None:
+                    args += ["--timeout", str(int(p["timeout"]))]
                 # args are already clean per-token values from JSON; pass them
                 # through as-is so substitution survives (headers must not be
                 # re-split at internal spaces, which used to lose the placeholder).

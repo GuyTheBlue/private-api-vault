@@ -476,6 +476,57 @@ echo "$RC_B" | grep -q 'tag.*bob' && ok "conc B kept bob identity" || bad "conc 
 kill "$ECONC" 2>/dev/null
 pkill -f "vault.py run --port $VPSRV3" 2>/dev/null
 
+# ---------- 22e. per-call --timeout: a slow endpoint dies fast under a short timeout, breathes under a long one ----------
+step "per-call timeout override (server /request --timeout)"
+mint tmo 2>/dev/null
+KEY_tmo=$(VAULT_PASS=passV3 python3 vault.py keygen tmo 2>/dev/null | grep '^VAULT_AGENT_KEY=' | cut -d= -f2)
+VPSRV4=18296
+cat >"$SCRATCH/slow_stub.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+class H(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_GET(self):
+        time.sleep(3)
+        b=b'{"ok":true}'
+        self.send_response(200); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
+    do_POST=do_GET
+HTTPServer(("127.0.0.1",18173), H).serve_forever()
+PY
+python3 "$SCRATCH/slow_stub.py" >/dev/null 2>&1 &
+ESLOW=$!
+(VAULT_PASS=passV3 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV4 >"$SCRATCH/server4.log" 2>&1 &)
+sleep 2
+curl -s --max-time 2 "http://127.0.0.1:$VPSRV4/health" >/dev/null || bad "tmo server not up"
+# short timeout (1s) on a 3s endpoint -> CALL FAILED (timed out), call_status null
+cat >"$SCRATCH/tmo_s.json" <<EOF
+{"agent":"tmo","key":"$KEY_tmo","method":"GET","url":"http://127.0.0.1:18173/slow","expiry":0,"reason":"tmo short","keys":[],"timeout":1}
+EOF
+T0=$SECONDS
+curl -s -X POST "http://127.0.0.1:$VPSRV4/request" -H 'Content-Type: application/json' -d @"$SCRATCH/tmo_s.json" >"$SCRATCH/tmo_r.json" &
+PCS=$!
+sleep 1.5
+RK=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep tmo | awk '{print $1}' | head -1)
+[ -n "$RK" ] && VAULT_PASS=passV3 python3 vault.py decide "$RK" yes >/dev/null 2>&1
+wait $PCS; TS=$((SECONDS-T0))
+TMO=$(cat "$SCRATCH/tmo_r.json")
+echo "$TMO" | grep -q "timed out" && ok "per-call timeout=1 failed fast on a 3s endpoint" || bad "timeout=1 should have timed out: $TMO"
+[ "$TS" -le 5 ] && ok "timeout=1 returned quickly (${TS}s)" || bad "timeout=1 too slow (${TS}s): $TMO"
+# long timeout (10s) on same 3s endpoint -> call_status 200
+cat >"$SCRATCH/tmo_l.json" <<EOF
+{"agent":"tmo","key":"$KEY_tmo","method":"GET","url":"http://127.0.0.1:18173/slow","expiry":0,"reason":"tmo long","keys":[],"timeout":10}
+EOF
+curl -s -X POST "http://127.0.0.1:$VPSRV4/request" -H 'Content-Type: application/json' -d @"$SCRATCH/tmo_l.json" >"$SCRATCH/tmo_r2.json" &
+PCL=$!
+sleep 1.5
+RK=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep tmo | awk '{print $1}' | head -1)
+[ -n "$RK" ] && VAULT_PASS=passV3 python3 vault.py decide "$RK" yes >/dev/null 2>&1
+wait $PCL
+TMO2=$(cat "$SCRATCH/tmo_r2.json")
+echo "$TMO2" | grep -q '"call_status": 200' && ok "per-call timeout=10 let the same call succeed (200)" || bad "timeout=10 should have succeeded: $TMO2"
+kill "$ESLOW" 2>/dev/null
+pkill -f "vault.py run --port $VPSRV4" 2>/dev/null
+
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"
