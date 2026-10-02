@@ -281,7 +281,10 @@ def update_value(service, value, passphrase):
     e = store[service]
     salt = base64.b64decode(e["salt"])
     pk = derive_key(passphrase, salt)
-    dk = aes_crypt(pk, e["iv2"], base64.b64decode(e["dk_pass"]), decrypt=True).hex()
+    try:
+        dk = aes_crypt(pk, e["iv2"], base64.b64decode(e["dk_pass"]), decrypt=True).hex()
+    except RuntimeError:
+        raise RuntimeError("WRONG PASSPHRASE — could not unlock the existing key to overwrite it. The passphrase entered does not match the one this key was stored under.")
     iv1 = os.urandom(16).hex()
     ct = aes_crypt(dk, iv1, value.encode())
     e["ct"] = base64.b64encode(ct).decode()
@@ -481,6 +484,15 @@ def cmd_init():
 
 def cmd_add(argv, passphrase):
     if len(argv) < 1: print("usage: vault.py add <service>"); return 1
+    # Prove the passphrase actually unlocks the EXISTING vault BEFORE staging a
+    # key. `add` is meant to UNLOCK the store and put a key in it — it must never
+    # silently wrap a new key under a WRONG passphrase (which would make that key
+    # undecryptable by the real passphrase). Refuse cleanly instead.
+    try:
+        _verify_passphrase(passphrase)
+    except RuntimeError:
+        print("WRONG PASSPHRASE — the process could not unlock the vault. Start again with the correct passphrase.")
+        return 1
     service = argv[0]
     value = ask("VAULT_VALUE", "Paste the API key value (hidden): ")
     store = load_store()

@@ -47,6 +47,22 @@ echo "$SD" | grep -qi "decrypt\|passphrase\|No key" && ok "show with wrong passp
 SN=$(VAULT_PASS=$PASS python3 vault.py show nonexistent_service 2>&1)
 echo "$SN" | grep -qi "No key stored" && ok "show refuse unknown service" || bad "show should refuse unknown: $SN"
 
+# ---------- 2c. `add` refuses a WRONG passphrase (must not wrap the key under it) ----------
+step "add refuses wrong passphrase (no silent mis-key)"
+# init an isolated scratch vault (its OWN store + recovery key, so it can't
+# disturb the suite's live passV3 vault)
+TMPV=$(mktemp -d)
+cp ciphergate.py "$TMPV/vault.py"
+RP=$(cd "$TMPV" && VAULT_PASS=okpass ./vault.py init)
+RECV=$(echo "$RP" | grep -A1 'RECOVERY' | tail -1 | tr -d '[:space:]')
+NPC=$(cd "$TMPV" && VAULT_PASS=okpass VAULT_REC="$RECV" VAULT_VALUE=alpha ./vault.py add ALPHA </dev/null 2>&1)
+echo "$NPC" | grep -qi stored && ok "scratch: first key added with correct passphrase" || bad "scratch first add: $NPC"
+WRONG=$(cd "$TMPV" && VAULT_PASS=badpass VAULT_REC="$RECV" VAULT_VALUE=beta ./vault.py add BETA </dev/null 2>&1)
+echo "$WRONG" | grep -qi "WRONG PASSPHRASE" && ok "add with WRONG passphrase is refused cleanly" || bad "wrong passphrase NOT refused: $WRONG"
+(cd "$TMPV" && VAULT_PASS=okpass ./vault.py list 2>/dev/null | grep -q BETA) && bad "BETA staged despite wrong passphrase" || ok "wrong-passphrase key NOT stored"
+OVW=$(cd "$TMPV" && VAULT_PASS=badpass VAULT_REC="$RECV" VAULT_VALUE=zz ./vault.py add ALPHA </dev/null 2>&1)
+echo "$OVW" | grep -qi "WRONG PASSPHRASE" && ok "overwrite with wrong passphrase refused cleanly (no traceback)" || bad "overwrite leaked/traced: $OVW"
+
 # ---------- 3. identity: NO key -> denied ----------
 step "no key denied"
 R3=$(HERMES_HOME=/Users/guymeaker/.hermes/profiles/link VAULT_PASS=$PASS python3 vault.py request GET https://x 0 r 2>&1)
