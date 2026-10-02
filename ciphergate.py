@@ -976,13 +976,18 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
     # GUARD: detect a bare (unbracketed) granted key name in a header value or
     # body. If the agent wrote "Bearer FAL_API_KEY" or "FAL_API_KEY" instead of
     # "[FAL_API_KEY]", CipherGate would forward it literally and the call fails
-    # auth silently. Refuse loudly and tell them the right form.
+    # auth silently. Refuse loudly and tell them the right form. This check runs
+    # over the URL (query string) too — a token that belongs in ?api_key= must
+    # also use brackets, and a bare name there is caught the same way.
     suspicious = []
+    for name in keys:
+        if name in st and ("[" + name + "]") not in url and name in url:
+            suspicious.append(("url", name))
     for hn, hv in headers.items():
         for name in keys:
             if name in st and ("[" + name + "]") not in hv and name in hv:
                 suspicious.append((hn, name))
-    sdata = data if isinstance(data, str) else ""
+    sdata = json.dumps(data) if isinstance(data, (dict, list)) else (data if isinstance(data, str) else "")
     for name in keys:
         if name in st and ("[" + name + "]") not in sdata and name in sdata:
             suspicious.append(("body", name))
@@ -1002,15 +1007,18 @@ def _exec_call(method, url, headers, data, keys, passphrase, agent):
             return out
         return s
     final_headers = {k: sub(v) for k, v in headers.items()}
+    final_url = sub(url)                          # query-string token substitution
     final_data = data
-    if data and isinstance(data, str) and "[" in data:
-        txt = data
+    if isinstance(final_data, (dict, list)):      # serialize object body before substitution
+        final_data = json.dumps(final_data)
+    if isinstance(final_data, str) and "[" in final_data:
+        txt = final_data
         for name in keys:
             if name in st:
                 txt = txt.replace("[" + name + "]", unwrap(name, passphrase))
         final_data = txt
     body = final_data.encode() if isinstance(final_data, str) else (final_data or bytes())
-    req = urllib.request.Request(url, data=body or None, headers=final_headers, method=method)
+    req = urllib.request.Request(final_url, data=body or None, headers=final_headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             rbody = resp.read().decode(errors="replace")

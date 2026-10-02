@@ -374,6 +374,55 @@ echo "$DRRESP" | grep -q "relay_probe_xyz" && ok "server /request relays the JSO
 kill "$EBODY" 2>/dev/null
 pkill -f "vault.py run --port $VPSRV" 2>/dev/null
 
+# ---------- 22c. query-string token substitution + bare-name guard in URL ----------
+step "query-string [KEY] substitutes in the URL; bare name refused"
+VPSRV2=18294
+(cp "$SCRATCH/echo_body.py" "$SCRATCH/echo_qs.py")
+cat >"$SCRATCH/echo_qs.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_GET(self):
+        body=("{\"path\":\""+self.path+"\"}").encode()
+        self.send_response(200); self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+    do_POST=do_GET
+HTTPServer(("127.0.0.1",18177), H).serve_forever()
+PY
+python3 "$SCRATCH/echo_qs.py" >/dev/null 2>&1 &
+EQS=$!
+(VAULT_PASS=passV3 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV2 >"$SCRATCH/server2.log" 2>&1 &)
+sleep 2
+# 22c-1: query-string marker must be substituted; the echoed path must not show a literal [fal]
+cat >"$SCRATCH/qs_req.json" <<EOF
+{"agent":"x_bare","key":"$BK__KEY","method":"GET","url":"http://127.0.0.1:18177/anything?api_key=[fal]", "expiry":0,"reason":"query token test","keys":["fal"]}
+EOF
+curl -s -X POST "http://127.0.0.1:$VPSRV2/request" -H 'Content-Type: application/json' \
+  -d @"$SCRATCH/qs_req.json" >"$SCRATCH/qs_first.json" &
+CP2=$!
+sleep 1.5
+RK3=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep x_bare | awk '{print $1}' | tail -1)
+[ -n "$RK3" ] && VAULT_PASS=passV3 python3 vault.py decide "$RK3" yes >/dev/null 2>&1
+wait $CP2
+QSR=$(cat "$SCRATCH/qs_first.json")
+echo "$QSR" | grep -q '"call_status": 200' && ok "query-string [fal] call succeeded (substituted in URL)" || bad "query-string call FAILED: $QSR"
+echo "$QSR" | grep -q '\[fal\]' && bad "literal [fal] leaked into URL" || ok "no literal [fal] marker in the URL echo"
+# 22c-2: BARE query name (no brackets) must be REFUSED by the URL guard
+cat >"$SCRATCH/qs_bare_req.json" <<EOF
+{"agent":"x_bare","key":"$BK__KEY","method":"GET","url":"http://127.0.0.1:18177/anything?api_key=fal", "expiry":0,"reason":"bare query test","keys":["fal"]}
+EOF
+curl -s -X POST "http://127.0.0.1:$VPSRV2/request" -H 'Content-Type: application/json' \
+  -d @"$SCRATCH/qs_bare_req.json" >"$SCRATCH/qs_bare.json" &
+CP3=$!
+sleep 1.5
+RK4=$(VAULT_PASS=passV3 python3 vault.py pending 2>/dev/null | grep x_bare | awk '{print $1}' | tail -1)
+[ -n "$RK4" ] && VAULT_PASS=passV3 python3 vault.py decide "$RK4" yes >/dev/null 2>&1
+wait $CP3
+QSB=$(cat "$SCRATCH/qs_bare.json")
+echo "$QSB" | grep -qi "REFUSED\|bare key" && ok "bare query name refused by URL guard" || bad "bare query name NOT refused: $QSB"
+kill "$EQS" 2>/dev/null
+pkill -f "vault.py run --port $VPSRV2" 2>/dev/null
+
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"
