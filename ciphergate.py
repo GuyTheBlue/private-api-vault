@@ -71,6 +71,7 @@ leaves it open, and only then does the key matter.
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
   ciphergate list                                  show key NAMES only (never values) - no passphrase needed
+  ciphergate show <service>                        [Batman only] show ONE stored key's real VALUE (passphrase-gated, to verify a key)
   ciphergate keygen <profile>                     mint a .env key for a profile (shown once)
   ciphergate access list|add|remove               manage which profiles are allowed
   ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>]
@@ -456,6 +457,27 @@ def cmd_list():
     if not st: print("(store empty)"); return 0
     for s, e in st.items():
         print(f"{s}  (encrypted, {len(base64.b64decode(e['ct']))} bytes, added {e['created']})")
+    return 0
+
+def cmd_show(argv, passphrase):
+    """`show <service>`  — Batman-only: view a stored key's VALUE. Requires the
+    vault passphrase (agents never have it), so only the owner can see secrets.
+    Used to verify a key was stored/updated correctly."""
+    if len(argv) < 1:
+        print("usage: ciphergate show <service>\n  Shows the real value of one stored key. Passphrase-gated (Batman only).")
+        return 1
+    service = argv[0]
+    st = load_store()
+    if service not in st:
+        print(f"No key stored as '{service}'. Use `ciphergate list` to see the names.")
+        return 1
+    try:
+        value = unwrap(service, passphrase)
+    except Exception:
+        print("Could not decrypt - is the passphrase correct?")
+        return 1
+    print(f"{service} = {value}")
+    log_event({"ev":"SHOW_VALUE","by":"batman","service":service,"len":len(value)})
     return 0
 
 # ---------- bot config (Telegram token + chat id) ----------
@@ -1598,6 +1620,7 @@ def main():
         "init": lambda: cmd_init(),
         "add": lambda: cmd_add(args, passphrase),
         "list": lambda: cmd_list(),
+        "show": lambda: cmd_show(args, passphrase),
         "keygen": lambda: cmd_keygen(args, passphrase),
         "access": lambda: cmd_access(args, passphrase),
         "request": lambda: cmd_request(args, passphrase),

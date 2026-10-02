@@ -38,6 +38,15 @@ ok "keys minted for all tested profiles"
 VAULT_PASS=$PASS VAULT_VALUE=dummy_fal_key_ABC123 VAULT_REC=$REC python3 vault.py add fal >/dev/null 2>&1
 ok "stored dummy 'fal' key for lease tests"
 
+# ---------- 2b. show <service> reveals the stored VALUE (Batman-only, passphrase-gated) ----------
+step "show reveals a stored key's value"
+SH=$(VAULT_PASS=$PASS python3 vault.py show fal 2>&1)
+echo "$SH" | grep -q "dummy_fal_key_ABC123" && ok "show displays the real stored value" || bad "show failed to reveal value: $SH"
+SD=$(VAULT_PASS=wrongpass python3 vault.py show fal 2>&1)
+echo "$SD" | grep -qi "decrypt\|passphrase\|No key" && ok "show with wrong passphrase is refused" || bad "show leaked with wrong pass: $SD"
+SN=$(VAULT_PASS=$PASS python3 vault.py show nonexistent_service 2>&1)
+echo "$SN" | grep -qi "No key stored" && ok "show refuse unknown service" || bad "show should refuse unknown: $SN"
+
 # ---------- 3. identity: NO key -> denied ----------
 step "no key denied"
 R3=$(HERMES_HOME=/Users/guymeaker/.hermes/profiles/link VAULT_PASS=$PASS python3 vault.py request GET https://x 0 r 2>&1)
