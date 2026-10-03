@@ -99,6 +99,36 @@ leaves it open, and only then does the key matter.
   It exists ONLY for quick manual tests and the regression suite - you would
   NOT use it for a real agent request, because it skips every gate.
 
+== WHY `call` CANNOT BE USED TO BYPASS THE GATE (important) ==
+`call` sounds dangerous ("no approval"), so let's be explicit about why it is
+NOT a back door into the vault:
+  - `call` is a CLI command that ALWAYS requires the vault PASSPHRASE (it is not
+    in the no-passphrase list). An AGENT has no passphrase - it physically cannot
+    run `call`. The only identity that can run `call` is the vault owner (Batman)
+    typing it at a prompt, which is exactly the person who approves everything.
+  - `call` is NOT exposed by the server. Running `ciphergate run` opens exactly
+    three endpoints: GET /health, POST /request, POST /resolve. There is no
+    /call route. An agent talking to a running server can never reach `call` -
+    the only path to a real call is /request, and /request ALWAYS goes through
+    the gate (identity -> lease check -> ask Batman). 
+  - So the only person who can run `call` is the one who already owns the vault,
+    and an agent - whether typing on its own or calling the running server - has
+    no way to reach it. `call` skips the *approval* step only because the person
+    running it is the approver. It is not an agent-accessible bypass.
+  - The one honest caveat (true of any vault): a malicious process already running
+    as the same OS user could read a shell-exposed passphrase and call `call`.
+    That is a same-user operating-system boundary, not a vault-logic flaw.
+
+== NO LONG-LIVED PROCESS CARRIES THE PASSPHRASE IN ITS ENV ==
+The server (`ciphergate run`) REFUSES to start if `VAULT_PASS` is set inline or
+exported, because a long-running process keeps that env visible to any same-user
+process (via `ps -E`) and the inline form also lands in shell history. It forces
+the passphrase to be typed at the interactive prompt instead (getpass), which
+never touches env or history. Scripts/tests that need a throwaway dummy passphrase
+can start it with VAULT_ALLOW_ENV_PASS=1 - never use a real passphrase that way.
+Purpose: the vault passphrase should only ever live in memory, typed at a prompt,
+not stored in an always-visible environment variable.
+
 == ADDING & UPDATING KEYS (the passphrase is verified first) ==
 `ciphergate add <service>` UNLOCKS the vault to put a key in — so it requires
 the CORRECT passphrase, every time. Before anything is written, CipherGate proves
@@ -1607,6 +1637,20 @@ def cmd_run(argv, passphrase):
     """
     import http.server, threading
     if not passphrase:
+        # LEAK GUARD: a long-running server keeps whatever passphrase channel you
+        # gave it. If VAULT_PASS is INLINE/EXPORTED (VAULT_PASS=... ciphergate run),
+        # the passphrase is visible in the process env via `ps -E` and often in
+        # shell history — a same-user leak. A real server must take the passphrase
+        # from the INTERACTIVE prompt (getpass), which never touches env/history.
+        # Scripts/tests with a throwaway dummy passphrase can opt in explicitly.
+        if os.environ.get("VAULT_PASS") and os.environ.get("VAULT_ALLOW_ENV_PASS") != "1":
+            print("REFUSED: VAULT_PASS is set in the environment. A long-running server would")
+            print("expose it to any same-user process (ps -E) and shell history — a leak.")
+            print("Unset it and start with the passphrase typed at the prompt:")
+            print("  unset VAULT_PASS && ciphergate run")
+            print("(Scripts/tests with a throwaway dummy passphrase can opt in with")
+            print(" VAULT_ALLOW_ENV_PASS=1 — never use a real passphrase that way.)")
+            return 1
         passphrase = _pass()
     port = 18200
     if argv and argv[0] == "--port" and len(argv) > 1:

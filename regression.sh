@@ -417,7 +417,7 @@ HTTPServer(("127.0.0.1",18178), H).serve_forever()
 PY
 python3 "$SCRATCH/echo_body.py" >/dev/null 2>&1 &
 EBODY=$!
-(VAULT_PASS=passV3 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV >"$SCRATCH/server.log" 2>&1 &)
+(VAULT_PASS=passV3 VAULT_ALLOW_ENV_PASS=1 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV >"$SCRATCH/server.log" 2>&1 &)
 sleep 2
 cat >"$SCRATCH/dr_req.json" <<EOF
 {"agent":"x_bare","key":"$BK__KEY","method":"POST","url":"http://127.0.0.1:18178/anything","expiry":0,"reason":"data relay test","keys":["fal"],"headers":{"Authorization":"Bearer [fal]","Content-Type":"application/json"},"data":{"prompt":"relay_probe_xyz","n":2}}
@@ -452,7 +452,7 @@ HTTPServer(("127.0.0.1",18177), H).serve_forever()
 PY
 python3 "$SCRATCH/echo_qs.py" >/dev/null 2>&1 &
 EQS=$!
-(VAULT_PASS=passV3 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV2 >"$SCRATCH/server2.log" 2>&1 &)
+(VAULT_PASS=passV3 VAULT_ALLOW_ENV_PASS=1 VAULT_WAIT_MIN=10 python3 vault.py run --port $VPSRV2 >"$SCRATCH/server2.log" 2>&1 &)
 sleep 2
 # 22c-1: query-string marker must be substituted; the echoed path must not show a literal [fal]
 cat >"$SCRATCH/qs_req.json" <<EOF
@@ -507,7 +507,7 @@ HTTPServer(("127.0.0.1",18175), H).serve_forever()
 PY
 python3 "$SCRATCH/echo_conc.py" >/dev/null 2>&1 &
 ECONC=$!
-(VAULT_PASS=passV3 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV3 >"$SCRATCH/server3.log" 2>&1 &)
+(VAULT_PASS=passV3 VAULT_ALLOW_ENV_PASS=1 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV3 >"$SCRATCH/server3.log" 2>&1 &)
 sleep 2
 curl -s --max-time 2 "http://127.0.0.1:$VPSRV3/health" >/dev/null || { bad "concurrent server not up"; }
 # two DISTINCT identities: x_bare (KEY_x_bare) + concb (KEY_concb); their /request
@@ -556,7 +556,7 @@ HTTPServer(("127.0.0.1",18173), H).serve_forever()
 PY
 python3 "$SCRATCH/slow_stub.py" >/dev/null 2>&1 &
 ESLOW=$!
-(VAULT_PASS=passV3 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV4 >"$SCRATCH/server4.log" 2>&1 &)
+(VAULT_PASS=passV3 VAULT_ALLOW_ENV_PASS=1 VAULT_WAIT_MIN=15 python3 vault.py run --port $VPSRV4 >"$SCRATCH/server4.log" 2>&1 &)
 sleep 2
 curl -s --max-time 2 "http://127.0.0.1:$VPSRV4/health" >/dev/null || bad "tmo server not up"
 # short timeout (1s) on a 3s endpoint -> CALL FAILED (timed out), call_status null
@@ -587,6 +587,23 @@ TMO2=$(cat "$SCRATCH/tmo_r2.json")
 echo "$TMO2" | grep -q '"call_status": 200' && ok "per-call timeout=10 let the same call succeed (200)" || bad "timeout=10 should have succeeded: $TMO2"
 kill "$ESLOW" 2>/dev/null
 pkill -f "vault.py run --port $VPSRV4" 2>/dev/null
+
+# ---------- 22f. run refuses an env-passphrase (leak guard) unless explicitly opted in ----------
+step "run refuses VAULT_PASS from env (leak guard); opt-in allows scripts"
+LVG=$(mktemp -d)
+cp ciphergate.py "$LVG/vault.py"
+(cd "$LVG" && VAULT_PASS=lg ./vault.py init >/dev/null 2>&1)
+# without opt-in: run must REFUSE rather than expose the env passphrase to ps -E
+LREF=$(cd "$LVG" && VAULT_PASS=lg ./vault.py run --port 18292 </dev/null 2>&1)
+echo "$LREF" | grep -qi "REFUSED" && ok "run refuses an env-provided passphrase (no opt-in)" || bad "run did not refuse env passphrase: $LREF"
+echo "$LREF" | grep -qi "ps -E\|leak" && ok "refusal explains the ps -E leak" || bad "refusal did not mention leak: $LREF"
+lsof -iTCP:18292 -sTCP:LISTEN -P -n 2>/dev/null | awk 'NR>1{print $2}' | xargs -r kill 2>/dev/null
+# with explicit VAULT_ALLOW_ENV_PASS=1: the server starts (used by scripts/tests with dummy passphrase)
+(cd "$LVG" && VAULT_PASS=lg VAULT_ALLOW_ENV_PASS=1 ./vault.py run --port 18292 >srv.log 2>&1 &)
+sleep 2
+H=$(curl -s --max-time 2 "http://127.0.0.1:18292/health" 2>&1)
+echo "$H" | grep -qi '"status": *"up"' && ok "run starts with VAULT_ALLOW_ENV_PASS=1 (script/dummy path)" || bad "opt-in run failed: $H"
+pkill -f "vault.py run --port 18292" 2>/dev/null
 
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
