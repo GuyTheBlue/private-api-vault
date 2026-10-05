@@ -246,6 +246,10 @@ _PENDING_TAG = "gsq-vault-pending-v1"
 _ACCESS_TAG = "gsq-vault-access-v1"
 WAIT_MIN    = int(os.environ.get("VAULT_WAIT_MIN", "5"))   # variable wait window
 CALL_TIMEOUT = int(os.environ.get("VAULT_CALL_TIMEOUT", "300"))  # upstream HTTP read timeout (default 300s; set lower for quick health checks)
+# Server bind address. Default 127.0.0.1 = ONLY reachable from this machine
+# (safe). Set VAULT_BIND=0.0.0.0 inside a CONTAINER so Docker's published port
+# can reach it (then publish only to the host's 127.0.0.1: -p 127.0.0.1:18200:18200).
+BIND_HOST   = os.environ.get("VAULT_BIND", "127.0.0.1")
 # A single lock guards ALL signed state-file read-modify-write. The per-save
 # lock inside _signed_save only protects the write; the RACE that matters (two
 # agents staging a pending entry at the same instant both load, add, then save
@@ -1799,8 +1803,8 @@ def cmd_run(argv, passphrase):
     # long upstream call (e.g. a 200s fal render) never blocks another agent's
     # request. The _STATE_LOCK guards the shared state files (pending/leases)
     # so concurrent staging / leasing is safe.
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
-    print(f"CipherGate server is running on http://127.0.0.1:{port}. "
+    srv = http.server.ThreadingHTTPServer((BIND_HOST, port), H)
+    print(f"CipherGate server is running on http://{BIND_HOST}:{port}. "
           f"It holds the passphrase in memory, so keep this window open (Ctrl-C to stop).")
     print(f"Agents call it over this local address with their agent name + .env key.")
     stop = threading.Event()
