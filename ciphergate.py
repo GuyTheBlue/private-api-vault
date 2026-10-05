@@ -392,24 +392,28 @@ def _verify_passphrase(passphrase):
     """Prove the passphrase unlocks the CURRENT vault, or raise RuntimeError with
     a message explaining exactly what failed.
 
-    Checks EVERY stored key, not just the first — so a single key stored under a
-    wrong passphrase (a partial/corrupt store) is caught, not silently skipped.
-    When the key store is empty, it verifies against the signed access file (HMAC
-    keyed to the passphrase), which exists from `init` — so even the FIRST `add`
-    is checked against the real passphrase, never silently wrapped under a typo."""
+    ORDER MATTERS. We first check the passphrase against the SIGNED STATE files
+    (HMAC keyed to the passphrase from `init`). If those fail, the passphrase
+    itself is wrong — and we say so, because blaming a key would tell the user
+    to `del` a perfectly good key over a typo. Only once the passphrase is
+    PROVEN against the state do we check EVERY stored key, so a single key
+    stored under a wrong passphrase (a partial/corrupt store) is caught and
+    named — and that message is only shown when the state already matched."""
+    # 1) passphrase vs the signed state — a wrong passphrase fails here.
+    for path, tag in ((AF, _ACCESS_TAG), (LF_, _LEASE_TAG), (PF, _PENDING_TAG)):
+        if os.path.exists(path):
+            _, st = _signed_load(path, passphrase, tag, None)
+            if st == "tampered":
+                raise RuntimeError("the passphrase does not match the vault's signed state (wrong passphrase).")
+    # 2) passphrase vs every stored key — the state matched, so a failure here is
+    #    a genuinely corrupt key, not a typo.
     store = load_store()
-    if store:
-        for svc in sorted(store):
-            try:
-                unwrap(svc, passphrase)
-            except Exception:
-                raise RuntimeError(f"Unable to unlock with that passphrase: key '{svc}' is locked under a different passphrase (it was probably added with a wrong one). Fix it: `ciphergate del {svc}` then `ciphergate add {svc}` again.")
-        return True
-    # empty key store: the passphrase must still match the signed state from init
-    _, st = _signed_load(AF, passphrase, _ACCESS_TAG, {})
-    if st in ("ok", "missing"):
-        return True
-    raise RuntimeError("the passphrase does not match the vault's signed state (wrong passphrase).")
+    for svc in sorted(store):
+        try:
+            unwrap(svc, passphrase)
+        except Exception:
+            raise RuntimeError(f"key '{svc}' is locked under a DIFFERENT passphrase (it was probably added with a wrong one). The rest of the vault opens fine, so this key alone is the problem. Fix it: `ciphergate del {svc}` then `ciphergate add {svc}` again.")
+    return True
 
 def _verify_owner(passphrase):
     """Prove the passphrase is the vault OWNER's WITHOUT decrypting any key.
@@ -1381,6 +1385,14 @@ def cmd_rotate_recovery_key(passphrase):
     return 0
 
 def cmd_status(passphrase):
+    # Verify the passphrase FIRST. status prompts for it, so it must actually
+    # check it — otherwise a wrong passphrase silently shows every signed file as
+    # [tampered], which reads like tampering rather than a bad passphrase.
+    try:
+        _verify_passphrase(passphrase)
+    except RuntimeError as e:
+        print(f"WRONG PASSPHRASE — {e}")
+        return 1
     st = load_store()
     keys, ast = load_access(passphrase)
     leases, lst = purge_expired(passphrase)

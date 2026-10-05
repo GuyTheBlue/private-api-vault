@@ -605,6 +605,16 @@ H=$(curl -s --max-time 2 "http://127.0.0.1:18292/health" 2>&1)
 echo "$H" | grep -qi '"status": *"up"' && ok "run starts with VAULT_ALLOW_ENV_PASS=1 (script/dummy path)" || bad "opt-in run failed: $H"
 pkill -f "vault.py run --port 18292" 2>/dev/null
 
+# ---------- 22g. status actually VERIFIES the passphrase (a wrong one is refused) ----------
+# NOTE: by this point the suite's vault passphrase is passV3 (set by the recover
+# test at ~line 327), so the "correct" passphrase here is passV3, not $PASS.
+step "status verifies the passphrase (a wrong one is refused, not silently accepted)"
+SSWRONG=$(VAULT_PASS=definitely_not_the_pass python3 vault.py status 2>&1)
+echo "$SSWRONG" | grep -qi "WRONG PASSPHRASE" && ok "status refuses a wrong passphrase" || bad "status accepted a wrong passphrase: $SSWRONG"
+echo "$SSWRONG" | grep -qi "tampered" && bad "status mislabelled a wrong passphrase as [tampered]" || ok "status no longer mislabels a wrong passphrase as [tampered]"
+SSRIGHT=$(VAULT_PASS=passV3 python3 vault.py status 2>&1)
+echo "$SSRIGHT" | grep -qi "vault dir" && ok "status still works with the correct passphrase" || bad "status failed with correct passphrase: $SSRIGHT"
+
 # ---------- 23. tamper writes to the ledger (LAST — breaks pending.json on purpose) ----------
 step "tamper is logged (not silent)"
 LEDGER="$SCRATCH/.vault/ledger.jsonl"
