@@ -991,7 +991,8 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     print(f"{agent}: no lease. Staged request key {req_key}.{key_txt} Handed to Batman to approve.{flag_txt}")
     # push the inline YES/NO/OTHER button to Batman on Telegram (real approval, no typing)
     try:
-        ok = tg_approval_button(passphrase, req_key, agent, http, keys, reason)
+        ok = tg_approval_button(passphrase, req_key, agent, http, keys, reason,
+                                expiry, detail if flagged else None)
         print("Telegram approval button " + ("sent." if ok else "NOT sent (check `bot info`)."))
     except Exception as ex:
         log_event({"ev":"TG_SEND_ERR","req_key":req_key,"why":str(ex)[:120]})
@@ -1532,16 +1533,22 @@ def tg_send(passphrase, text, buttons=None, parse_mode=None):
             [{"text": lbl, "callback_data": cb} for cb, lbl in buttons]]}
     return bool(tg_post(tok, "sendMessage", payload))
 
-def tg_approval_button(passphrase, req_key, agent, http, keys, reason):
+def tg_approval_button(passphrase, req_key, agent, http, keys, reason, expiry=0, flag=None):
     """Push the approval ask to Batman with YES/NO/OTHER inline buttons.
-    Sends as PLAIN TEXT (no HTML) so URLs with & ? etc never break parsing."""
+    Sends as PLAIN TEXT (no HTML) so URLs with & ? etc never break parsing.
+    Shows the requested LEASE (the expiry in minutes) so Batman can see whether
+    this is a one-off call or a standing grant BEFORE he taps."""
+    lease_txt = f"{expiry} min" if (expiry or 0) > 0 else "one-off (no lease)"
     lines = ["CipherGate — approve this?",
              "",
              f"agent : {agent}",
              f"call  : {http}",
              f"keys  : {', '.join(keys) or '-'}",
+             f"lease : {lease_txt}",
              f"reason: {reason or '-'}",
              f"req   : {req_key}"]
+    if flag:
+        lines.append(f"FLAGGED: {flag}")
     return tg_send(passphrase, "\n".join(lines), buttons=[
         (f"c:{req_key}:yes", "YES"),
         (f"c:{req_key}:no", "NO"),
