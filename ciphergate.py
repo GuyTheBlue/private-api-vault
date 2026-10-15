@@ -696,13 +696,26 @@ def cmd_bot(argv, passphrase):
     if not argv:
         print("usage: ciphergate.py bot set|info|update|clear"); return 1
     sub = argv[0].lower()
+    # Prove the passphrase unlocks the vault BEFORE answering. Without this a
+    # wrong passphrase decrypts nothing, so `info` reports "not set" — which is
+    # indistinguishable from a vault that has no bot configured and sends the
+    # user chasing a phantom. `add` and `status` already verify here; `bot` was
+    # the odd one out.
+    try:
+        _verify_passphrase(passphrase)
+    except RuntimeError as ex:
+        print("WRONG PASSPHRASE —", ex)
+        return 1
+    store = load_store()
     tid = bot_token(passphrase)
     cid = bot_chat(passphrase)
 
     if sub == "info":
+        tok_shown = _mask(tid) if tid else ("(present but NOT DECRYPTABLE — corrupt entry?)" if BOT_TOKEN_SVC in store else "(not set)")
+        cid_shown = cid or ("(present but NOT DECRYPTABLE — corrupt entry?)" if BOT_CHAT_SVC in store else "(not set)")
         print("Telegram bot config (login required — you're unlocked):")
-        print(f"  token   : {_mask(tid)}")
-        print(f"  chat id : {cid or '(not set)'}")
+        print(f"  token   : {tok_shown}")
+        print(f"  chat id : {cid_shown}")
         print(f"  configured: {'YES' if tid and cid else 'NO (set it with `bot set`)'}")
         return 0
 
