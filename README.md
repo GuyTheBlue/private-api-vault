@@ -41,9 +41,12 @@ First run — set the passphrase and mint the off-site recovery key:
 ciphergate init
 ```
 
-**Windows:** use the installed `ciphergate` command — it works in CMD and
-PowerShell. (`python3` usually does not exist on Windows.) For the no-install
-route below, use `py ciphergate.py <cmd>`.
+**Windows:** use the installed `ciphergate` command — but CipherGate encrypts
+by shelling out to `openssl`, and Windows does not ship openssl, so it fails at
+the first key it tries to store. The straightforward path is **WSL**, a Linux
+environment, where Python and openssl both exist. (`python3` usually does not
+exist on Windows either; for the no-install route in CMD/PowerShell, use
+`py ciphergate.py <cmd>` — same openssl caveat.)
 
 ## No-install fallback
 
@@ -122,3 +125,7 @@ Telegram buttons carry the live approvals; `decide` is the terminal stand-in.
 Run `bash regression.sh` after any change — verifies encryption at rest,
 the identity gate (no key / ACCESS SNEAK), tamper fail-closed, lease purge,
 the sensitivity gate (no-use / flag), and no plaintext anywhere.
+
+## Licence
+MIT — see [`LICENSE`](LICENSE). The software comes **as is**, with no warranty
+of any kind: use it, ship it, just keep the copyright notice with it.
