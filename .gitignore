@@ -12,5 +12,11 @@ ledger.jsonl
 
 # ===== OS cruft =====
 .DS_Store
-Thumbs.db__pycache__/
+Thumbs.db
+__pycache__/
 *.pyc
+
+# ===== packaging byproducts =====
+build/
+dist/
+*.egg-info/

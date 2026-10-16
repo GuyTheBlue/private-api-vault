@@ -153,6 +153,20 @@ will say something like:
      though it can't be decrypted, because it proves ownership from the vault's
      signed state rather than from the key itself.
 
+== INSTALLING IT (so you get the bare `ciphergate` command) ==
+CipherGate installs like any other Python command-line tool, and then you run
+it by name:
+  pipx install git+https://github.com/GuyTheBlue/private-api-vault
+  ciphergate --help
+(`uv tool install git+...` does the same job; `pipx run git+...` runs it once
+without installing anything.) Every command below is written as
+  ciphergate <cmd>
+No install wanted? The file also runs straight from a clone - the PEP 394
+fallback form:
+  python3 ciphergate.py <cmd>
+On Windows `python3` usually does not exist: use the installed `ciphergate`
+command, or `py ciphergate.py <cmd>`.
+
 == HOW TO USE IT (all from a terminal) ==
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
@@ -177,6 +191,12 @@ will say something like:
   ciphergate bot set|info|clear                     configure the Telegram approval bot (token + chat id, stored encrypted; `info` masks the token, `clear` removes it)
 
 == WHERE FILES LIVE (all inside .vault/, kept out of git) ==
+  CipherGate looks for the store in this order: $VAULT_DIR, then .vault sitting
+  beside the program, then .vault in the current folder or the nearest one up
+  the tree (only a folder that actually holds a CipherGate store counts, so an
+  unrelated directory that happens to be called .vault is never adopted). With
+  none found it creates .vault in the current folder. Set VAULT_DIR=/path/to/.vault
+  to pin a store explicitly (a container mount, or a second vault).
   .vault/keys.json       the encrypted key store
   .vault/access.json     who is allowed (profile -> key fingerprint), signed
   .vault/leases.json     currently active grants only, signed, auto-expire
@@ -234,7 +254,51 @@ WHY THIS MATTERS TO YOU
 import sys, os, json, base64, getpass, hmac as _hmac, hashlib as _hl, subprocess, datetime, urllib.request, secrets, time, threading
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-VT   = os.path.join(BASE, ".vault")
+
+def _resolve_vault_dir():
+    """Find the .vault store.
+
+    Run directly (or in the container) this is simply .vault beside the file,
+    exactly as before. Installed as a `ciphergate` command the module is
+    imported from site-packages, so the folder next to the program is NOT the
+    user's vault - look at the folder you are standing in instead, and walk up
+    the tree like every other tool does. If nothing exists yet, create the
+    store in the current folder (never inside a package directory).
+
+    Order: $VAULT_DIR -> beside the program -> ./.vault -> up the tree ->
+                            current folder (created on first use).
+
+    The search rules (cwd + parents) only accept a folder that actually HOLDS
+    this tool's state files. A directory that merely happens to be called
+    ".vault" could belong to something else entirely, and silently adopting it
+    as the store is worse than not finding one.
+    """
+    def is_store(d):
+        return any(os.path.exists(os.path.join(d, f)) for f in
+                   ("keys.json", "access.json", "leases.json", "pending.json",
+                    "ledger.jsonl"))
+
+    env = os.environ.get("VAULT_DIR", "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    beside = os.path.join(BASE, ".vault")
+    if os.path.isdir(beside):
+        return beside
+    d = os.path.abspath(os.getcwd())
+    while True:
+        cand = os.path.join(d, ".vault")
+        if os.path.isdir(cand) and is_store(cand):
+            return cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    for d in (os.path.abspath(os.getcwd()), BASE):
+        if os.access(d, os.W_OK):
+            return os.path.join(d, ".vault")
+    return beside
+
+VT   = _resolve_vault_dir()
 KF   = os.path.join(VT, "keys.json")
 AF   = os.path.join(VT, "access.json")
 LF_  = os.path.join(VT, "leases.json")
@@ -572,7 +636,7 @@ def cmd_init():
     return 0
 
 def cmd_add(argv, passphrase):
-    if len(argv) < 1: print("usage: vault.py add <service>"); return 1
+    if len(argv) < 1: print("usage: ciphergate add <service>"); return 1
     # Prove the passphrase actually unlocks the EXISTING vault BEFORE staging a
     # key. `add` is meant to UNLOCK the store and put a key in it — it must never
     # silently wrap a new key under a WRONG passphrase (which would make that key
@@ -608,7 +672,7 @@ def cmd_del(argv, passphrase):
     unwrap it). Deleting drops the row; re-`add` it cleanly with the correct
     passphrase. The recovery escrow for that key is also gone (the new add mints a
     fresh one)."""
-    if len(argv) < 1: print("usage: vault.py del <service>"); return 1
+    if len(argv) < 1: print("usage: ciphergate del <service>"); return 1
     service = argv[0]
     # Owner-level proof: the passphrase must match the vault's signed state
     # (HMAC-keyed to the passphrase). We do NOT decrypt keys here — because del
@@ -694,7 +758,7 @@ def cmd_bot(argv, passphrase):
     """bot set|info|update|clear  — manage the Telegram bot config.
     token + chat id live in the encrypted store; the token is never printed."""
     if not argv:
-        print("usage: ciphergate.py bot set|info|update|clear"); return 1
+        print("usage: ciphergate bot set|info|update|clear"); return 1
     sub = argv[0].lower()
     # Prove the passphrase unlocks the vault BEFORE answering. Without this a
     # wrong passphrase decrypts nothing, so `info` reports "not set" — which is
@@ -750,7 +814,7 @@ def cmd_bot(argv, passphrase):
         print("Bot config cleared.")
         return 0
 
-    print("usage: ciphergate.py bot set|info|update|clear"); return 1
+    print("usage: ciphergate bot set|info|update|clear"); return 1
 
 def who_is_running():
     """Answer 'who launched this?' from the Hermes HOME env. Caveat: env can
@@ -796,7 +860,7 @@ def verify_identity(passphrase):
 
 def cmd_keygen(argv, passphrase):
     # keygen <profile>  -> mint a .env key for a profile, register its hash
-    if len(argv) < 1: print("usage: vault.py keygen <profile>"); return 1
+    if len(argv) < 1: print("usage: ciphergate keygen <profile>"); return 1
     prof = argv[0]
     keys, st = load_access(passphrase)
     if st != "ok":
@@ -813,7 +877,7 @@ def cmd_keygen(argv, passphrase):
 
 def cmd_access(argv, passphrase):
     if not argv:
-        print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
+        print("usage: ciphergate access list|add <profile> <key>|remove <profile>"); return 1
     sub, rest = argv[0], argv[1:]
     keys, st = load_access(passphrase)
     if st != "ok":
@@ -825,13 +889,13 @@ def cmd_access(argv, passphrase):
             print(f"{p}   (hash {h[:8]}...)")
         return 0
     if sub == "add":
-        if len(rest) < 2: print("usage: vault.py access add <profile> <key>"); return 1
+        if len(rest) < 2: print("usage: ciphergate access add <profile> <key>"); return 1
         keys[rest[0]] = key_hash(rest[1]); save_access(keys, passphrase)
         log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"add"})
         print(f"Registered .env key for {rest[0]}.")
         return 0
     if sub == "remove":
-        if not rest: print("usage: vault.py access remove <profile>"); return 1
+        if not rest: print("usage: ciphergate access remove <profile>"); return 1
         if rest[0] in keys:
             del keys[rest[0]]; save_access(keys, passphrase)
             log_event({"ev":"KEY_AUTH","profile":rest[0],"by":"batman","mode":"remove"})
@@ -839,7 +903,7 @@ def cmd_access(argv, passphrase):
         else:
             print(f"no .env key registered for {rest[0]}.")
         return 0
-    print("usage: vault.py access list|add <profile> <key>|remove <profile>"); return 1
+    print("usage: ciphergate access list|add <profile> <key>|remove <profile>"); return 1
 
 def classify_request(http):
     """Classify a request URL/substring against sensitive-API patterns.
@@ -898,7 +962,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     this function does NOT touch the process-global os.environ. When they are
     None (CLI path), identity is derived from HERMES_HOME + the .env key as usual."""
     if len(argv) < 3:
-        print("usage: vault.py request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>] [--timeout <secs>]")
+        print("usage: ciphergate request <method> <http> <expiry_min> <reason> [--keys k1,k2] [--header 'N:[k]']... [--data <json>] [--timeout <secs>]")
         return 1
     method = argv[0].upper()
     http = argv[1]
@@ -1010,7 +1074,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     except Exception as ex:
         log_event({"ev":"TG_SEND_ERR","req_key":req_key,"why":str(ex)[:120]})
         print("Telegram approval send failed:", ex)
-    print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `vault.py decide {req_key} yes|no|other [msg]`)")
+    print(f"(wait window = {WAIT_MIN} min; TELEGRAM STUB: `ciphergate decide {req_key} yes|no|other [msg]`)")
     return 0
 
 def cmd_pending(argv, passphrase):
@@ -1039,7 +1103,7 @@ def cmd_pending(argv, passphrase):
 def cmd_decide(argv, passphrase):
     # decide <req_key> <yes|no|other> [msg]   — TELEGRAM STUB
     if len(argv) < 2:
-        print("usage: vault.py decide <req_key> <yes|no|other> [msg]"); return 1
+        print("usage: ciphergate decide <req_key> <yes|no|other> [msg]"); return 1
     req_key, verdict = argv[0], argv[1].lower()
     msg = " ".join(argv[2:])
     if verdict not in ("yes", "no", "other"):
@@ -1069,7 +1133,7 @@ def _apply_verdict(passphrase, req_key, verdict, msg=""):
 
 def cmd_resolve(argv, passphrase):
     # resolve <req_key>  — agent returns and picks up the verdict
-    if len(argv) < 1: print("usage: vault.py resolve <req_key>"); return 1
+    if len(argv) < 1: print("usage: ciphergate resolve <req_key>"); return 1
     req_key = argv[0]
     pending, st = load_pending(passphrase)
     if st != "ok":
@@ -1254,7 +1318,7 @@ def cmd_call(argv, passphrase):
     # MANUALLY by a caller (secrets never leave the vault). Only the keys named
     # in the header/body placeholders are substituted.
     if len(argv) < 3:
-        print("usage: vault.py call <method> <url> [--header 'Name:[key_name]']... [--data <json>] [--timeout <secs>]")
+        print("usage: ciphergate call <method> <url> [--header 'Name:[key_name]']... [--data <json>] [--timeout <secs>]")
         return 1
     method = argv[0].upper()
     url = argv[1]
@@ -1437,58 +1501,52 @@ def _print_cyan(logo_lines):
     for line in logo_lines:
         print(f"{CYAN}{line}{RESET}")
 
+# The keyhole banner lives HERE, in the file - not in a side-car text file.
+# Only this module ships under a pip/pipx install (pyproject: py-modules =
+# ["ciphergate"]), so an art file sitting beside the script would go missing and
+# the installed command would print a different banner. One copy, one source of
+# truth: edit the art in this constant, and keep the lines verbatim - the blank
+# line between the keyhole and the CIPHERGATE wordmark is part of the art (it
+# spaces the drawing off the wordmark), and trailing spaces are load-bearing for
+# the lettering's right edge.
+KEYHOLE_ART = (
+    "                                  ,▄▄▓██████▓▄▄,",
+    "                              ▄▓██████████████████▓▄",
+    "                            ▄██████████▀▀▀▀██████████▄",
+    "                           ████████▀          ▀████████",
+    "                          ████████              ████████",
+    "                         ████████                ████████",
+    "                         ████████                ████████",
+    "                          ████████              ████████",
+    "                           ████████▄          ▄████████",
+    "                            ▀█████████▄    ▄█████████▀",
+    "                              ▀████████    ████████▀",
+    "                               ████████    ████████",
+    "                              ████████      ████████",
+    "                             ████████        ████████",
+    "                            ████████          ████████",
+    "                           ████████            ████████",
+    "                          ████████              ████████",
+    "                         ████████████████████████████████",
+    "                         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+    "",
+    " ██████╗██╗██████╗ ██╗  ██╗███████╗██████╗  ██████╗  █████╗ ████████╗███████╗",
+    "██╔════╝██║██╔══██╗██║  ██║██╔════╝██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
+    "██║     ██║██████╔╝███████║█████╗  ██████╔╝██║  ███╗███████║   ██║   █████╗  ",
+    "██║     ██║██╔═══╝ ██╔══██║██╔══╝  ██╔══██╗██║   ██║██╔══██║   ██║   ██╔══╝  ",
+    "╚██████╗██║██║     ██║  ██║███████╗██║  ██║╚██████╔╝██║  ██║   ██║   ███████╗",
+    " ╚══════╝╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+)
+
 def _banner():
-    """CipherGate intro: render Batman's keyhole art (keyhole_art.txt) in cyan
-    phosphor, no clear, no leading blank lines — the keyhole prints first thing.
-    The art file is the source of truth; edits change the banner directly."""
-    art = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keyhole_art.txt")
-    try:
-        with open(art, encoding="utf-8") as f:
-            raw = [ln.rstrip("\n") for ln in f]
-        # strip leading + trailing blank lines so ONLY the art prints first
-        while raw and raw[0] == "":
-            raw.pop(0)
-        while raw and raw[-1] == "":
-            raw.pop()
-        logo_lines = [ln for ln in raw if ln.strip()]
-        print("\n\n")                        # breathing space: two blank lines above the keyhole
-        _print_cyan(logo_lines)
-        print()
-        print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
-        return
-    except Exception:
-        logo_lines = [
-            "                                  ,▄▄▓██████▓▄▄,",
-            "                              ▄▓██████████████████▓▄",
-            "                            ▄██████████▀▀▀▀██████████▄",
-            "                           ████████▀          ▀████████",
-            "                          ████████              ████████",
-            "                         ████████                ████████",
-            "                         ████████                ████████",
-            "                          ████████              ████████",
-            "                           ████████▄          ▄████████",
-            "                            ▀█████████▄    ▄█████████▀",
-            "                              ▀████████    ████████▀",
-            "                               ████████    ████████",
-            "                              ████████      ████████",
-            "                             ████████        ████████",
-            "                            ████████          ████████",
-            "                           ████████            ████████",
-            "                          ████████              ████████",
-            "                         ████████████████████████████████",
-            "                         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
-            "",
-            " ██████╗██╗██████╗ ██╗  ██╗███████╗██████╗  ██████╗  █████╗ ████████╗███████╗",
-            "██╔════╝██║██╔══██╗██║  ██║██╔════╝██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
-            "██║     ██║██████╔╝███████║█████╗  ██████╔╝██║  ███╗███████║   ██║   █████╗  ",
-            "██║     ██║██╔═══╝ ██╔══██║██╔══╝  ██╔══██╗██║   ██║██╔══██║   ██║   ██╔══╝  ",
-            "╚██████╗██║██║     ██║  ██║███████╗██║  ██║╚██████╔╝██║  ██║   ██║   ███████╗",
-            " ╚══════╝╚═╝╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝",
-        ]
-        print("\n\n")                        # breathing space above the fallback keyhole too
-        _print_cyan(logo_lines)
-        print()
-        print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
+    """CipherGate intro: render the keyhole art (KEYHOLE_ART) in cyan
+    phosphor, no clear, no leading blank lines - the keyhole prints first
+    thing. The art is baked into this module above, so an installed copy
+    (where no art file ships) shows exactly the same banner."""
+    print("\n\n")                        # breathing space: two blank lines above the keyhole
+    _print_cyan(KEYHOLE_ART)
+    print()
+    print(f"{CYAN}   Secure API Routing — API keys held encrypted; every call waits on the gate.{RESET}\n")
 
 def _split(line):
     import shlex

@@ -31,7 +31,7 @@ wall and the audit trail.
 """
 import os, sys, time, datetime
 
-LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VAULT_AUDIT.md")
+LEDGER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vault_gate.ledger")
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -69,7 +69,7 @@ def main():
             return 0
         log(f"KEYREQ {service} by {who} (job {job_id}, reason: {reason}) | no Batman approval marker -> REFUSED (ask Batman first)")
         print(f"REFUSED {service}: no fresh Batman OK in the ledger for {service}. "
-              f"Per the rules, {who} must ask Batman first. Request logged. (VAULT_AUDIT.md)")
+              f"Per the rules, {who} must ask Batman first. Request logged. (see the gate ledger)")
         return 2
     if argc >= 2 and sys.argv[1] == "status":
         print("Gate online. Keys are not enumerated by value from this gate; the master store "

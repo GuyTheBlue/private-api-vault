@@ -34,7 +34,7 @@ There are THREE layers. Don't mix them up:
 | Container `ciphergate` (writable layer)     | Docker           | **2.4 MB** (virtual 145 MB) |
 | Container's inner OS (Debian 13)        | inside container | **127 MB**  |
 | Docker total (images+containers)        | Docker           | **~196 MB** |
-| `ciphergate.py`                         | Mac repo         | **93 KB**   |
+| `ciphergate.py`                         | Mac repo         | **97 KB**   |
 | Real `.vault/` (encrypted store)        | Mac repo         | **352 KB**  |
 | Mac internal disk free                  | Mac              | **42 GB**   |
 
@@ -91,6 +91,13 @@ Then:
     python3 /cg.py --help            # full command list
 
 Leave with `exit`.
+
+Why `python3 /cg.py` here and not a bare `ciphergate`? This container is a bare
+box: it holds the FILE at `/cg.py` and a copied vault at `/.vault`, and nothing
+was ever installed into it, so there is no command to call. On a real machine
+you install once (`pipx install git+https://github.com/GuyTheBlue/private-api-vault`)
+and then every command in this sheet is written `ciphergate <cmd>`, no path
+needed. Same program, two ways in — install on a host, run the file in a bare box.
 
 ---
 

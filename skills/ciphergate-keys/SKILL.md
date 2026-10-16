@@ -13,14 +13,29 @@ That is the whole point: keys stay locked, every call waits on the gate.
 
 CipherGate runs on macOS or Linux. It needs Python 3 and the `openssl` command (already on macOS and most Linux). Nothing else to install — no pip, no database, no daemon.
 
+Install it as a command, then run it by name:
+
 ```bash
-# Clone or copy ciphergate.py into a directory you control
-git clone https://github.com/GuyTheBlue/private-api-vault.git
-cd private-api-vault
+pipx install git+https://github.com/GuyTheBlue/private-api-vault
+ciphergate --help
 
 # First run: set the passphrase and mint the off-site recovery key
+ciphergate init
+```
+
+(`uv tool install git+https://github.com/GuyTheBlue/private-api-vault` does the same job; `pipx run git+...` runs it once without installing.)
+
+No-install fallback — the file runs straight from a clone (PEP 394 form, `python3`, run from the repo folder so it finds the `.vault/` beside it):
+
+```bash
+git clone https://github.com/GuyTheBlue/private-api-vault.git
+cd private-api-vault
 python3 ciphergate.py init
 ```
+
+Every command in this skill is written as the bare `ciphergate <cmd>`. Wherever you see that, the fallback is `python3 ciphergate.py <cmd>` (Windows: the installed `ciphergate` command, or `py ciphergate.py <cmd>` — `python3` usually does not exist there).
+
+The store is a `.vault/` folder; CipherGate looks for it in `$VAULT_DIR`, then beside the program, then in the folder you are standing in (or the nearest one up the tree).
 
 The passphrase unlocks the vault. The recovery key is printed once — print it, put it somewhere safe off-site (a password manager, a safe deposit box, a trusted human). Lose both, lose the vault. That is the safety we chose.
 

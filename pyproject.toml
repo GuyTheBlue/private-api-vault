@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ciphergate"
+version = "1.0.0"
+description = "CipherGate - an encrypted API-key vault that makes the HTTPS call itself, so a key never leaves the vault."
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["vault", "api-keys", "secrets", "encryption", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.scripts]
+ciphergate = "ciphergate:main"
+
+[tool.setuptools]
+# Flat layout: the whole app is one file at the repo root (ciphergate.py), so it
+# installs as the top-level module `ciphergate`. Listed explicitly so the other
+# root-level helper scripts (stub_endpoint.py, vault_gate.py) are NOT installed.
+py-modules = ["ciphergate"]
