@@ -14,6 +14,8 @@ never shown, never returned by the API.
 
 ## Install (once) — then run the bare `ciphergate` command
 
+The site explains what CipherGate is, how the Telegram approval works, and walks through the setup: https://ciphergate.g-squared.co.za
+
 ```bash
 pipx install git+https://github.com/GuyTheBlue/private-api-vault
 ciphergate --help
