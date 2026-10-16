@@ -71,7 +71,7 @@ The gate then runs four checks:
 1. **Identity** — who are you? (via the keypass)
 2. **Sensitivity** — is this a credential/admin/token-mint endpoint? (hard no, even under a live lease)
 3. **Lease** — do you already have a valid lease for this key + endpoint?
-4. **Verdict** — if no lease, the request is staged with a unique key and handed to Batman (the human) for approval
+4. **Verdict** — if no lease, the request is staged with a unique key and handed to Bitman (the human) for approval
 
 ### Step 3 — wait for the verdict (if needed)
 
@@ -101,23 +101,23 @@ The gate's job is to say "fuck off" (with the reason) or "here is the HTTP resul
 1. Who asked? (identity via keypass)
 2. Is this allowed for this profile + request? (sensitivity check)
 3. Is there a valid lease? (if yes, make the call)
-4. If no lease, ask Batman (the human) for permission
-5. Batman's answer: yes (grant a short lease, make the call) or no (refuse, log it)
+4. If no lease, ask Bitman (the human) for permission
+5. Bitman's answer: yes (grant a short lease, make the call) or no (refuse, log it)
 
 Every decision is written to the ledger. The ledger is append-only. The vault is encrypted at rest. The `.vault/` directory is gitignored — it is never committed.
 
 ## Commands (for reference)
 
-You will mostly use `request` and `resolve`. The others are for the vault owner (Batman):
+You will mostly use `request` and `resolve`. The others are for the vault owner (Bitman):
 
 - `init` — first run, set passphrase, mint recovery key
-- `add <service>` — store an encrypted key (Batman only)
+- `add <service>` — store an encrypted key (Bitman only)
 - `list` — names only, never values
 - `keygen <profile>` — mint a .env keypass for a profile (shown once)
 - `access list|add|remove` — manage the keypass map (passphrase required)
 - `request <method> <url> <expiry_min> <reason>` — the gate (you use this)
-- `pending` — staged requests waiting on Batman (passphrase required)
-- `decide <req_key> yes|no|other [msg]` — Batman's verdict (passphrase required)
+- `pending` — staged requests waiting on Bitman (passphrase required)
+- `decide <req_key> yes|no|other [msg]` — Bitman's verdict (passphrase required)
 - `resolve <req_key>` — pick up the verdict (you use this)
 - `call <method> <url>` — test/regression only, skips all gates (do not use)
 - `lease` — active leases (passphrase required)

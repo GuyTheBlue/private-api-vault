@@ -14,7 +14,7 @@ never sent in chat, and never printed.
 == WHO IS ALLOWED TO ASK (the gate) ==
 CipherGate decides who is knocking by looking at two things together:
   1. HERMES_HOME (which profile is running, e.g. spielberg), and
-  2. the secret .env key that profile presents (set up once by Batman).
+  2. the secret .env key that profile presents (set up once by Bitman).
 Every profile that is allowed has its own .env key, and CipherGate stores only
 a scrambled fingerprint of it (its hash), never the key itself. A profile with
 no key (like robin) can't pass. If one profile tries to use ANOTHER profile's
@@ -24,18 +24,18 @@ key, CipherGate spots the mismatch and refuses, logging it. No deny-list needed.
 When an agent asks for a call, CipherGate decides like this:
   1. WHO: the running profile must show a key registered to it, else DENIED.
   2. If there is a still-valid lease (a standing grant) for this agent and the
-     exact key names, the call goes ahead WITHOUT asking Batman.
+     exact key names, the call goes ahead WITHOUT asking Bitman.
   3. Otherwise CipherGate stages the request (a pending entry with a unique
-     request key), logs it, and asks Batman to approve.
-Batman approves from Telegram with the inline YES / NO / OTHER buttons:
+     request key), logs it, and asks Bitman to approve.
+Bitman approves from Telegram with the inline YES / NO / OTHER buttons:
      YES   -> the call happens now (and a lease is granted if one was asked).
      NO    -> the agent is refused.
-     OTHER -> the agent is refused AND gets a message from Batman
+     OTHER -> the agent is refused AND gets a message from Bitman
              (the reason, typed into Telegram, comes back to the agent verbatim).
 There is no "pass-through" — no request ever skips the gate.
 
 == TELEGRAM APPROVAL ==
-CipherGate pushes the approval ask to Batman's Telegram with real buttons.
+CipherGate pushes the approval ask to Bitman's Telegram with real buttons.
 You tap, the vault acts. (The older `decide <key> yes|no|other [msg]` command
 still works for the same purpose from the terminal.)
 
@@ -44,7 +44,7 @@ still works for the same purpose from the terminal.)
 HTTP. The agent never runs the CLI itself, has no passphrase, and never sees a
 secret. The agent sends WHO it is (agent name + the secret .env key, which stays
 in the agent's own profile) and the call it wants; the vault verifies, gets
-Batman's approval if needed, substitutes the token in memory, makes the call,
+Bitman's approval if needed, substitutes the token in memory, makes the call,
 and returns the result. Endpoints (all localhost, default port 18200):
   GET  /health    -> {"status":"up","vault":".vault"}
   POST /request   -> stage a call and WAIT for the verdict (the main one)
@@ -69,7 +69,7 @@ token, and keep the brackets. Any data/header/URL field without brackets is
 forwarded verbatim. `timeout` defaults to 300s (override per call with an
 integer; set it high enough for slow jobs like image generation). The server is
 multi-threaded, so one agent's slow call never blocks another's — they run on
-separate threads and each waits only on its own Batman approval.
+separate threads and each waits only on its own Bitman approval.
 
 == TAMPER-PROOFING ==
 The state files (access / lease / pending) carry a secret signature (HMAC)
@@ -79,7 +79,7 @@ no longer matches, refuses to trust the file, and logs a TAMPER event to the
 ledger so it is never silent.
 
 == THE REQUEST KEY — what it is for (important to know) ==
-A request key is ONLY needed in ONE situation: Batman has not answered within
+A request key is ONLY needed in ONE situation: Bitman has not answered within
 the wait window, so the vault sends a "come back later" (timeout) reply. In that
 one case you keep the key and use it to check back for the verdict.
 In every other case the request key is not something you act on:
@@ -91,11 +91,11 @@ leaves it open, and only then does the key matter.
 
 == `request` vs `call` — the difference ==
   ciphergate request   is the GATED path: goes through identity check, the
-  sensitivity gate, the lease check, and (if no live lease) asks Batman for
+  sensitivity gate, the lease check, and (if no live lease) asks Bitman for
   approval on Telegram. This is what a real agent uses to make a call from
   inside the vault's rules. Returns the result.
   ciphergate call      is the UNGATED, manual helper: it does the substitution
-  and sends immediately, with NO identity check, NO lease, NO Batman approval.
+  and sends immediately, with NO identity check, NO lease, NO Bitman approval.
   It exists ONLY for quick manual tests and the regression suite - you would
   NOT use it for a real agent request, because it skips every gate.
 
@@ -104,13 +104,13 @@ leaves it open, and only then does the key matter.
 NOT a back door into the vault:
   - `call` is a CLI command that ALWAYS requires the vault PASSPHRASE (it is not
     in the no-passphrase list). An AGENT has no passphrase - it physically cannot
-    run `call`. The only identity that can run `call` is the vault owner (Batman)
+    run `call`. The only identity that can run `call` is the vault owner (Bitman)
     typing it at a prompt, which is exactly the person who approves everything.
   - `call` is NOT exposed by the server. Running `ciphergate run` opens exactly
     three endpoints: GET /health, POST /request, POST /resolve. There is no
     /call route. An agent talking to a running server can never reach `call` -
     the only path to a real call is /request, and /request ALWAYS goes through
-    the gate (identity -> lease check -> ask Batman). 
+    the gate (identity -> lease check -> ask Bitman). 
   - So the only person who can run `call` is the one who already owns the vault,
     and an agent - whether typing on its own or calling the running server - has
     no way to reach it. `call` skips the *approval* step only because the person
@@ -170,9 +170,9 @@ command, or `py ciphergate.py <cmd>`.
 == HOW TO USE IT (all from a terminal) ==
   ciphergate init                                 first run: set a passphrase, get your off-site recovery key
   ciphergate add    <service>                     add or update an encrypted key (e.g. add FAL_API_KEY)
-  ciphergate del    <service>                     [Batman only] PERMANENTLY remove a stored key (passphrase + type DELETE to confirm) - use this to drop a key that got stored under a wrong passphrase, then re-add it cleanly
+  ciphergate del    <service>                     [Bitman only] PERMANENTLY remove a stored key (passphrase + type DELETE to confirm) - use this to drop a key that got stored under a wrong passphrase, then re-add it cleanly
   ciphergate list                                  show key NAMES only (never values) - no passphrase needed
-  ciphergate show <service>                        [Batman only] show ONE stored key's real VALUE (passphrase-gated, to verify a key)
+  ciphergate show <service>                        [Bitman only] show ONE stored key's real VALUE (passphrase-gated, to verify a key)
   ciphergate keygen <profile>                     mint a .env key for a profile (shown once)
   ciphergate access list|add|remove               manage which profiles are allowed
   ciphergate request <method> <url> <mins> <reason> [--keys k1,k2] [--header "N:[key]"] [--data <json>] [--timeout <secs>]
@@ -666,7 +666,7 @@ def cmd_add(argv, passphrase):
     return 0
 
 def cmd_del(argv, passphrase):
-    """`del <service>` — remove a stored key entirely (Batman only, passphrase-
+    """`del <service>` — remove a stored key entirely (Bitman only, passphrase-
     gated). This is the escape hatch for a key that got stored under a WRONG
     passphrase and can no longer be overwritten (update_value would fail to
     unwrap it). Deleting drops the row; re-`add` it cleanly with the correct
@@ -706,11 +706,11 @@ def cmd_list():
     return 0
 
 def cmd_show(argv, passphrase):
-    """`show <service>`  — Batman-only: view a stored key's VALUE. Requires the
+    """`show <service>`  — Bitman-only: view a stored key's VALUE. Requires the
     vault passphrase (agents never have it), so only the owner can see secrets.
     Used to verify a key was stored/updated correctly."""
     if len(argv) < 1:
-        print("usage: ciphergate show <service>\n  Shows the real value of one stored key. Passphrase-gated (Batman only).")
+        print("usage: ciphergate show <service>\n  Shows the real value of one stored key. Passphrase-gated (Bitman only).")
         return 1
     service = argv[0]
     st = load_store()
@@ -830,7 +830,7 @@ def who_is_running():
 def verify_identity(passphrase):
     """Return (runner, ok, reason). The vault decides WHO is knocking purely
     from HOME env (HERMES_HOME -> runner) + the key it presents. A profile
-    only ever has the key Batman put in its .env; a profile without one
+    only ever has the key Bitman put in its .env; a profile without one
     (robin) owns nothing in the list and can't pass. Flash another profile's
     key and the running profile won't own it -> ACCESS SNEAK.
 
@@ -909,7 +909,7 @@ def classify_request(http):
     """Classify a request URL/substring against sensitive-API patterns.
 
     Returns (verdict, detail): verdict is 'no_use' (refuse outright), 'flag'
-    (warn Batman before approval), or 'ok'. Built from analysing cloud-API
+    (warn Bitman before approval), or 'ok'. Built from analysing cloud-API
     scopes that mint tokens, expose credentials, or touch account/team/security.
     Matching is on substrings in the request string, so it catches the endpoint
     regardless of the exact host or path formatting."""
@@ -1019,7 +1019,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
             print(f"DENIED: unknown key(s) requested: {', '.join(missing)}. 'Not in my city.'")
             return 1
 
-    # SENSITIVITY GATE: hard NO-USE vs flag-for-Batman. Runs BEFORE the lease
+    # SENSITIVITY GATE: hard NO-USE vs flag-for-Bitman. Runs BEFORE the lease
     # so a live lease can't be used to smuggle a credential-mint call through.
     verdict, detail = classify_request(http)
     if verdict == "no_use":
@@ -1036,7 +1036,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
                 log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE_FLAG",
                            "keys":keys,"why":detail})
                 print(f"WARNING: live lease would cover {agent} for {','.join(keys)}, but this is FLAGGED: {detail}")
-                print("Refusing without Batman. Ask again or get explicit approval.")
+                print("Refusing without Bitman. Ask again or get explicit approval.")
                 return 9
             log_event({"ev":"DECIDE","agent":agent,"http":http,"outcome":"LEASE",
                        "keys":keys,"expires":lease.get("expires_iso")})
@@ -1044,7 +1044,7 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
             res = _exec_call(method, http, headers, data, keys, passphrase, agent, timeout)
             return res if isinstance(res, dict) else 0   # return the RESULT so the server can relay it
 
-    # No lease -> stage a PENDING entry with a UNIQUE key, ask Batman.
+    # No lease -> stage a PENDING entry with a UNIQUE key, ask Bitman.
     req_key = secrets.token_hex(8)
     pending, st = load_pending(passphrase)
     if st != "ok":
@@ -1063,10 +1063,10 @@ def cmd_request(argv, passphrase, agent_override=None, presented_key=None):
     log_event({"ev":"PENDING","agent":agent,"method":method,"http":http,"reason":reason,
                "expiry_min":expiry,"keys":keys,"req_key":req_key,"outcome":"ASK_BATMAN",
                "flag":detail if flagged else ""})
-    flag_txt = f"  [FLAGGED: {detail} - Batman, look before you approve]" if flagged else ""
+    flag_txt = f"  [FLAGGED: {detail} - Bitman, look before you approve]" if flagged else ""
     key_txt = f"  keys: [{','.join(keys)}]" if keys else ""
-    print(f"{agent}: no lease. Staged request key {req_key}.{key_txt} Handed to Batman to approve.{flag_txt}")
-    # push the inline YES/NO/OTHER button to Batman on Telegram (real approval, no typing)
+    print(f"{agent}: no lease. Staged request key {req_key}.{key_txt} Handed to Bitman to approve.{flag_txt}")
+    # push the inline YES/NO/OTHER button to Bitman on Telegram (real approval, no typing)
     try:
         ok = tg_approval_button(passphrase, req_key, agent, http, keys, reason,
                                 expiry, detail if flagged else None)
@@ -1111,7 +1111,7 @@ def cmd_decide(argv, passphrase):
     return _apply_verdict(passphrase, req_key, verdict, msg)
 
 def _apply_verdict(passphrase, req_key, verdict, msg=""):
-    """Shared: write Batman's YES/NO/OTHER verdict into a pending entry. Used by
+    """Shared: write Bitman's YES/NO/OTHER verdict into a pending entry. Used by
     the CLI `decide` command AND the Telegram inline-button poller, so both
     paths write the SAME signed state. Returns 0 on success, else exit code."""
     pending, st = load_pending(passphrase)
@@ -1153,7 +1153,7 @@ def cmd_resolve(argv, passphrase):
         backoff = min(WAIT_MIN * (2 ** retries), 10) if WAIT_MIN > 0 else 0
         if age_min < WAIT_MIN:
             still = e["asked_epoch"] + WAIT_MIN * 60 - now_epoch()
-            print(f"Still waiting on Batman. Come back in ~{int(still//60)}m (or {WAIT_MIN}min window); key {req_key} is yours.")
+            print(f"Still waiting on Bitman. Come back in ~{int(still//60)}m (or {WAIT_MIN}min window); key {req_key} is yours.")
             log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"STILL_PENDING","agent":e["agent"]})
             return 0
         # past the first window but no verdict -> count this retry, tell the agent
@@ -1162,7 +1162,7 @@ def cmd_resolve(argv, passphrase):
         save_pending(pending, passphrase)
         log_event({"ev":"RESOLVE","req_key":req_key,"outcome":"PENDING_RETRY","agent":e["agent"],
                    "retries":retries + 1,"backoff_min":backoff})
-        print(f"Batman hasn't answered in {WAIT_MIN} min. Not approved yet. "
+        print(f"Bitman hasn't answered in {WAIT_MIN} min. Not approved yet. "
               f"Wait {backoff} min, then retry with key {req_key} (retry #{retries + 1}).")
         return 0
 
@@ -1212,9 +1212,9 @@ def cmd_resolve(argv, passphrase):
         log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
         print(f"Denied [{req_key}] {e2['agent']}. 'Denied. Back to the Batcave.'")
         return 3
-    # other: always denied, but pass Batman's message verbatim
+    # other: always denied, but pass Bitman's message verbatim
     log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman","why":"other","msg":e2["msg"]})
-    print(f"Denied [{req_key}] {e2['agent']}. Batman says: \"{e2['msg']}\"")
+    print(f"Denied [{req_key}] {e2['agent']}. Bitman says: \"{e2['msg']}\"")
     return 3
 
 def cmd_lease(passphrase):
@@ -1426,7 +1426,7 @@ def cmd_update(passphrase):
 
 def cmd_rotate_recovery_key(passphrase):
     """rotate-recovery-key  — retire a (possibly compromised) recovery key.
-    Needs the vault passphrase (to prove it's Batman) + the OLD recovery key
+    Needs the vault passphrase (to prove it's Bitman) + the OLD recovery key
     (to prove possession) + a NEW one (generated fresh). Re-wraps ONLY the
     recovery escrow on every key — the secrets and the passphrase envelope are
     untouched, so no secret is re-entered. The new key is printed once; keep it
@@ -1590,7 +1590,7 @@ def tg_post(token, method, payload):
         return None
 
 def tg_send(passphrase, text, buttons=None, parse_mode=None):
-    """Send a Telegram message to Batman. buttons = [[cb,label],...] renders an
+    """Send a Telegram message to Bitman. buttons = [[cb,label],...] renders an
     inline keyboard. No bot configured -> no-op (logs TG_UNCONFIGURED)."""
     tok = bot_token(passphrase)
     cid = bot_chat(passphrase)
@@ -1605,9 +1605,9 @@ def tg_send(passphrase, text, buttons=None, parse_mode=None):
     return bool(tg_post(tok, "sendMessage", payload))
 
 def tg_approval_button(passphrase, req_key, agent, http, keys, reason, expiry=0, flag=None):
-    """Push the approval ask to Batman with YES/NO/OTHER inline buttons.
+    """Push the approval ask to Bitman with YES/NO/OTHER inline buttons.
     Sends as PLAIN TEXT (no HTML) so URLs with & ? etc never break parsing.
-    Shows the requested LEASE (the expiry in minutes) so Batman can see whether
+    Shows the requested LEASE (the expiry in minutes) so Bitman can see whether
     this is a one-off call or a standing grant BEFORE he taps."""
     lease_txt = f"{expiry} min" if (expiry or 0) > 0 else "one-off (no lease)"
     lines = ["CipherGate — approve this?",
@@ -1628,13 +1628,13 @@ def tg_approval_button(passphrase, req_key, agent, http, keys, reason, expiry=0,
 
 def tg_poll_loop(passphrase, stop_event):
     """Background thread: long-poll Telegram getUpdates; on an inline-button
-    callback (c:<req_key>:<yes|no|other>) from Batman, apply the verdict via the
+    callback (c:<req_key>:<yes|no|other>) from Bitman, apply the verdict via the
     SAME shared path as `decide`. Runs until stop_event is set.
 
     OTHER is a two-step: the button tap alone cannot carry a typed reason. On an
-    OTHER tap the vault asks Batman to type the reason, then the NEXT text
+    OTHER tap the vault asks Bitman to type the reason, then the NEXT text
     message from him is captured as the `msg` and applied (agent sees
-    "Batman says: <reason>")."""
+    "Bitman says: <reason>")."""
     import time as _time
     offset = 0
     idle = 2
@@ -1689,7 +1689,7 @@ def tg_poll_loop(passphrase, stop_event):
             msg_id = cb_msg.get("message_id")
             chat_id = cb_msg.get("chat", {}).get("id") or cid
             if verdict == "other":
-                # TWO-STEP: don't apply yet — ask Batman to type the reason
+                # TWO-STEP: don't apply yet — ask Bitman to type the reason
                 awaiting_other[req_key] = msg_id
                 tg_post(tok, "answerCallbackQuery",
                         {"callback_query_id": cq["id"], "text": "type the reason"})
@@ -1698,7 +1698,7 @@ def tg_poll_loop(passphrase, stop_event):
                         "chat_id": chat_id, "message_id": msg_id,
                         "text": f"↩️ OTHER for req {req_key} — TYPE your reason as the "
                                 f"next message to this bot.\nThe agent will be told: "
-                                f"\"Batman says: <your reason>\".",
+                                f"\"Bitman says: <your reason>\".",
                         "reply_markup": {"inline_keyboard": []}})
                 continue
             # YES / NO apply immediately
@@ -1824,7 +1824,7 @@ def cmd_run(argv, passphrase):
                             req_key = kk
                 except Exception:
                     pass
-                # SYNCHRONOUS WAIT: the agent's call blocks here until Batman
+                # SYNCHRONOUS WAIT: the agent's call blocks here until Bitman
                 # decides (within the wait window). This is the real flow:
                 # agent sends, waits, gets the response. No separate resolve trip.
                 deadline = now_epoch() + WAIT_MIN*60
@@ -1856,7 +1856,7 @@ def cmd_run(argv, passphrase):
                     else:
                         self._reply(200, {"ok":True,"req_key":req_key,"outcome":"approved","rc":rr})
                 elif verdict == "no" or verdict == "other":
-                    # capture Batman's OTHER message BEFORE resolve pops the entry
+                    # capture Bitman's OTHER message BEFORE resolve pops the entry
                     deny_msg = ""
                     try:
                         pend_tmp, _st = load_pending(passphrase)
@@ -1875,7 +1875,7 @@ def cmd_run(argv, passphrase):
                 else:
                     self._reply(408, {"ok":False,"req_key":req_key,
                         "outcome":"timeout",
-                        "note":f"Batman hasn't answered yet. Wait then retry with this key: {req_key}"})
+                        "note":f"Bitman hasn't answered yet. Wait then retry with this key: {req_key}"})
             elif self.path == "/resolve":
                 agent = p.get("agent",""); key = p.get("key","")
                 ok, why = _verify_agent_key(agent, key)

@@ -3,7 +3,7 @@
 Terminal API-key vault for the Gsquared Productions fleet.
 
 The logo is a **keyhole with a bar through it** — nothing gets past until the
-gate (Batman) opens it. That's the whole point: keys stay locked, every call
+gate (Bitman) opens it. That's the whole point: keys stay locked, every call
 waits on the gate.
 
 Holds API keys encrypted, keeps a signed access map (profile -> hash of its
@@ -44,7 +44,8 @@ ciphergate init
 **Windows:** use the installed `ciphergate` command — but CipherGate encrypts
 by shelling out to `openssl`, and Windows does not ship openssl, so it fails at
 the first key it tries to store. The straightforward path is **WSL**, a Linux
-environment, where Python and openssl both exist. (`python3` usually does not
+environment where both are normally present, though a minimal distro may need
+`openssl` installed. (`python3` usually does not
 exist on Windows either; for the no-install route in CMD/PowerShell, use
 `py ciphergate.py <cmd>` — same openssl caveat.)
 
@@ -84,7 +85,7 @@ ciphergate keygen <profile>                  mint a .env key for a profile (show
 ciphergate access list|add|remove            manage .env-key map (passphrase)
 ciphergate request <method> <url> <mins> <reason>   run the decision gate (identity from env)
 ciphergate pending                           show staged requests (passphrase)
-ciphergate decide <req_key> yes|no|other [msg]   Batman's verdict (terminal alternative to Telegram)
+ciphergate decide <req_key> yes|no|other [msg]   Bitman's verdict (terminal alternative to Telegram)
 ciphergate resolve <req_key>                 agent returns and picks up the verdict
 ciphergate call <method> <url> [--header "Name:[key_name]"] [--data <json>]  substitute+send (test only)
 ciphergate lease                             active leases (passphrase)
@@ -99,9 +100,9 @@ profile (from HOME env) must present a `.env` key registered to it — no key,
 or flashing another profile's key (ACCESS SNEAK), is denied and logged.
 Every request is then classified for sensitivity: credential/admin/token-mint
 endpoints are a hard NO-USE (refused outright, even under a live lease), and
-account/billing/team calls are FLAGGED for Batman before approval. A clean
+account/billing/team calls are FLAGGED for Bitman before approval. A clean
 request flows to the lease check, then is staged with a unique key and handed
-to Batman. The agent returns with that key (`resolve`) to pick up the verdict.
+to Bitman. The agent returns with that key (`resolve`) to pick up the verdict.
 Telegram buttons carry the live approvals; `decide` is the terminal stand-in.
 
 ## Security model

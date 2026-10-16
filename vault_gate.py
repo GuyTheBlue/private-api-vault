@@ -7,12 +7,12 @@ without the rules being met. One program, the ONLY sanctioned path to a key.
 
 RULES IT ENFORCES (mechanical, not by goodwill):
   1. A key is released ONLY when the ledger shows a fresh APPROVED entry
-     from Batman for that service. No approved entry -> refusal.
+     from Bitman for that service. No approved entry -> refusal.
   2. It NEVER prints, logs, or returns a key VALUE. At most it reports the
      service + key name + length, and may execute one authenticated call the
      caller passes in (key injected into that call's env only).
   3. Every request and every refusal is written to the audit ledger, so
-     Batman sees WHO asked, for WHAT, WHEN, and the outcome.
+     Bitman sees WHO asked, for WHAT, WHEN, and the outcome.
 
 USAGE (agents coordinate through this, never read the store directly):
     python3 vault_gate.py request <service> <job_id> <reason>
@@ -25,7 +25,7 @@ USAGE (agents coordinate through this, never read the store directly):
 
 NOTE (honest limits): this is a QUICK stopgap — a speed-bump. With a
 plaintext .env an agent can still bypass it by reading the file directly.
-Real protection (encrypt the store + a master password only Batman holds +
+Real protection (encrypt the store + a master password only Bitman holds +
 remote vault) is the "go big, for fun" build later. This gate is the first
 wall and the audit trail.
 """
@@ -42,7 +42,7 @@ def log(line):
 
 def has_recent_approval(service, ttl_min=30):
     """Fresh OK_BATMAN_YES marker for service in the ledger within ttl_min.
-    Uses a dedicated token that only a genuine Batman approval produces, so
+    Uses a dedicated token that only a genuine Bitman approval produces, so
     refusal lines (which never contain the token) can't be misread as approval."""
     if not os.path.exists(LEDGER):
         return False
@@ -67,9 +67,9 @@ def main():
             log(f"KEYREQ {service} by {who} (job {job_id}, reason: {reason}) | OK_BATMAN_YES marker -> GRANTED for job env only")
             print(f"GRANTED {service} to job {job_id} (in-job env only; value never exposed)")
             return 0
-        log(f"KEYREQ {service} by {who} (job {job_id}, reason: {reason}) | no Batman approval marker -> REFUSED (ask Batman first)")
-        print(f"REFUSED {service}: no fresh Batman OK in the ledger for {service}. "
-              f"Per the rules, {who} must ask Batman first. Request logged. (see the gate ledger)")
+        log(f"KEYREQ {service} by {who} (job {job_id}, reason: {reason}) | no Bitman approval marker -> REFUSED (ask Bitman first)")
+        print(f"REFUSED {service}: no fresh Bitman OK in the ledger for {service}. "
+              f"Per the rules, {who} must ask Bitman first. Request logged. (see the gate ledger)")
         return 2
     if argc >= 2 and sys.argv[1] == "status":
         print("Gate online. Keys are not enumerated by value from this gate; the master store "
