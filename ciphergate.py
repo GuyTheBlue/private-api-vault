@@ -1210,7 +1210,7 @@ def cmd_resolve(argv, passphrase):
         return res if isinstance(res, dict) else 0
     if e2["status"] == "no":
         log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman"})
-        print(f"Denied [{req_key}] {e2['agent']}. 'Denied. Back to the Batcave.'")
+        print(f"Denied [{req_key}] {e2['agent']}. 'Denied. Back to the Bitcave.'")
         return 3
     # other: always denied, but pass Bitman's message verbatim
     log_event({"ev":"REJECT","req_key":req_key,"agent":e2["agent"],"by":"batman","why":"other","msg":e2["msg"]})
@@ -1763,9 +1763,12 @@ def cmd_run(argv, passphrase):
         def log_message(self, *a): pass
         def _reply(self, code, obj):
             b = json.dumps(obj).encode()
-            self.send_response(code); self.send_header("Content-Type","application/json")
-            self.send_header("Content-Length", str(len(b))); self.end_headers()
-            self.wfile.write(b)
+            try:
+                self.send_response(code); self.send_header("Content-Type","application/json")
+                self.send_header("Content-Length", str(len(b))); self.end_headers()
+                self.wfile.write(b)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client already gone — nothing to send
         def _body(self):
             ln = int(self.headers.get("Content-Length", 0) or 0)
             d = self.rfile.read(ln) if ln else b""
@@ -1869,7 +1872,7 @@ def cmd_run(argv, passphrase):
                     rrc = cmd_resolve([req_key], passphrase)
                     if verdict == "other":
                         # agent gets the written reason back, not an empty quote
-                        self._reply(403, {"ok":False,"outcome":"denied","by_batman":deny_msg})
+                        self._reply(403, {"ok":False,"outcome":"denied","by_bitman":deny_msg})
                     else:
                         self._reply(403, {"ok":False,"outcome":"denied"})
                 else:
